@@ -18,6 +18,23 @@ added to your cache.
 
 ---
 
+
+## 0. v1.1: fixes driven by the first real run (detector / reward / judge / train logs)
+
+| Log evidence | Root cause | Fix in v1.1 |
+|---|---|---|
+| `step 22: per-token KL 1.1633 exceeds 20 x target`, and beta 0.0375 → 0.0067 by step 10 | beta was multiplied by 0.75 on every quiet step. Constraint advantages used raw violations with λ_f 1.6 → 6.3, so they saturated the ±5 clip. There was no trust region. | Proportional KL controller (Ziegler et al., 2019) on the **on-policy** KL. Constraint terms scaled by the running violation sd. EMA-damped duals with λ ≤ 5. PPO epochs stop when per-token step KL > 0.02. **Rollback** to the last in-region adapter (lr halved, Adam reset, beta doubled) instead of aborting. lr 5e-6. |
+| `fabricated 0.750`, `feasible 0.23` | Numbers the *customer* gave (party size, times) were checked against the draft only | Fabrication is checked against draft + conversation, with number-word and "10:30am" normalisation |
+| `len x2.54` | The instruct model is verbose and the prompt gave no length budget | The prompt states the budget. The length constraint stays. |
+| `partial rho(tau, loglen \| m) -0.3771 vs human -0.0427`; padding shift −0.076 sd | The reward learnt a brevity shortcut the humans do not show | Frozen, clamped piecewise-linear length correction (net of context and content). The nuisance and the gate now control for length. |
+| naive within-content ρ **+0.140** vs τ **+0.104** | Residualising removed signal. The direct model estimates the same within-group quantity with less error. | Both candidates are trained. A **pre-registered selection** on the *validation* split chooses the one for RL, the other becomes the `pace_alt_reward` ablation, and only the selected one is gated on test. |
+| `affect groups 0/8 (gated 6)` | The spread was compared with the per-head sd rather than the sd of the head mean (√H too strict), with all-or-nothing gating | ICC-type reliability weight w_g = s²/(s²+SE²) scales each group's affect advantage |
+
+Plainly: the v1.0 claim that the residualised phrasing effect is the better reward is **not supported by
+your data**. The protection against dropping bad news comes from the feasible-set constraint (unit test 4:
+the direct reward with PACE's constraints reaches 0.997 on "keep + empathetic"). The pipeline now lets the
+data choose the reward estimator and reports both.
+
 ## 1. Critique of CARO v12, based on your own logs
 
 | # | Finding | Evidence |
@@ -53,16 +70,17 @@ sandbox (network blocked), so check the novelty statements below before you publ
 2. **Content-orthogonal phrasing effect.** This is the novel estimand.
    `τ(h,a) = E[S|h,a] − E[S|h,c(a)]`, where `c(a)` is the delexicalised dialogue acts (social acts
    removed) or lexical information units. The nuisance `m(h,c)` is cross-fitted by dialogue and
-   linearly recalibrated. `g(h,a)` is fitted on the residuals with Poisson-bootstrapped heads, and
-   the reward is the lower confidence bound. For equal content, τ differences equal true phrasing
-   differences. Content leakage enters only at second order (unit test 2: bad-news sensitivity
-   −0.61 naive vs −0.08 partialled, with the empathy effect preserved).
+   linearly recalibrated (v1.1: together with a length basis). `g(h,a)` is fitted on the residuals
+   with Poisson-bootstrapped heads. The head spread becomes a reliability weight in RL. For equal
+   content, τ differences equal true phrasing differences. Content leakage enters only at second
+   order (unit test 2: bad-news sensitivity −0.61 naive vs −0.08 partialled, with the empathy effect
+   preserved). v1.1 also fits the direct model E[S|h,a] and selects between the two on the
+   validation split, because on your data the direct model was more valid within content.
 3. **Constraints.** Information fidelity = `P_ent(response ⇒ source) · (1 − P_contra(source ⇒ response))`.
    This allows empathy to be added but forbids dropping or contradicting facts. Any number, time or
    reference code not in the source counts as fabrication. Length has an explicit budget.
 4. **PACE update.** The affect advantage is a leave-one-out advantage computed **only inside the
-   content-equivalent feasible set**, and groups whose spread is inside the ensemble noise are gated
-   out. Lagrangian constraint advantages get projected dual ascent. The loss is a Dr.-GRPO constant
+   content-equivalent feasible set**, weighted by the group's ensemble reliability. Lagrangian constraint advantages get projected dual ascent. The loss is a Dr.-GRPO constant
    normalisation plus PPO-clip over several epochs on the **exact sampled tokens**, with k3 KL to the
    base model obtained through adapter disabling.
 5. **Non-circular evaluation.** A judge trained on *human* labels from dialogues the detector and
@@ -73,7 +91,7 @@ sandbox (network blocked), so check the novelty statements below before you publ
    label on the test split (lower CI > 0). If it fails, RL is refused. No threshold is tuned.
 
 Arms: `source`, `base` (the instruct model rewriting zero-shot), `pace`, `pace_unconstrained`,
-`pace_naive_reward` (no partialling-out), and `sentiment_only`.
+`pace_alt_reward` (the reward candidate that was not selected), and `sentiment_only`.
 
 ## 3. What was verified here, and what was not
 
@@ -99,7 +117,7 @@ Not verified. Say so if you report results:
   the unconstrained τ reward drops bad news too. On synthetic data with tiny models, partialling-out
   did not beat the naive reward on within-content validity (+0.20 vs +0.29), and τ kept content
   leakage because m̂ under-fitted. The gate log flags that leakage.
-  The value of partialling-out on real data has to be shown by the `pace_naive_reward` ablation and
+  The value of partialling-out on real data has to be shown by the `pace_alt_reward` ablation and
   the gate diagnostics.
 * EmoWOZ next-turn emotions are mostly neutral and the human wizards were already polite. The
   within-content phrasing signal may be too weak for the gate to pass. That would be a finding

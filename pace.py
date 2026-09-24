@@ -16,6 +16,24 @@ Why a new algorithm (the short version; the long critique of CARO v12 is in READ
     human-anchored signal (gold-anchor rho=+0.06), and nothing stops the policy from dropping bad news
     to please the customer.  PACE removes the simulator, the panel and all post-hoc length patches.
 
+What v1.1 fixes (evidence from the first real run: 1_detector, 2_reward, 3_judge, 4_train_pace_42)
+    * RL died at step 22 (per-token KL 1.16 = 23 x target).  The causes were: beta collapsed from 0.05 to
+      0.0067 (x0.75 per quiet step); the raw-violation constraint terms with lam_f 1.6 -> 6.3 saturated the
+      advantage clip; and there was no trust region.  Fixes: a proportional KL controller on the ON-POLICY KL;
+      constraint advantages scaled by the running violation sd; EMA-damped duals with lam <= 5; PPO epochs that
+      stop at a per-step KL; rollback to the last in-region adapter (halve lr, reset Adam, double beta)
+      instead of aborting; lr 5e-6.
+    * 75% of rewrites were flagged as "fabricated" because details the CUSTOMER had given (party size, times)
+      were checked against the draft only; the feasible set was starved (0.23).  Fabrication is now checked
+      against draft + conversation, with number-word and am/pm normalisation.
+    * Responses were 2.5 x the draft length.  The prompt now states the length budget.
+    * The reward had learnt a brevity shortcut: partial rho(reward, length | m) = -0.377 against -0.043 for
+      the humans.  Fix: a frozen, clamped length correction, and the gate now controls for length.
+    * The direct outcome model was MORE valid within content than the residualised one (+0.140 vs +0.104).
+      The reward is now chosen by a pre-registered rule on the validation split, never on test.
+    * Affect gating compared the spread with the per-head sd, not the sd of the head mean (sqrt(H) too strict;
+      6/8 groups gated at step 20).  It is replaced by an ICC-type reliability weight.
+
 The algorithm (four estimators and one constrained policy-gradient update)
 
   (1) Emotion/Satisfaction Detection engine (ESD).  A RoBERTa classifier over the 7 EmoWOZ emotions,
@@ -38,7 +56,10 @@ The algorithm (four estimators and one constrained policy-gradient update)
       is exactly the phrasing effect.  Because residualisation removes the context/content variance
       that dominates S, the learning problem is easier.  A leaked content change moves tau only by a
       second-order amount (see unit test 2).  M bootstrapped heads (Osband et al., 2016) give an
-      epistemic sd, and the reward uses the lower confidence bound (pessimism: Jin et al., 2021).
+      epistemic uncertainty; in RL it enters as a reliability weight on the within-group advantage.  v1.1:
+      the direct model E[S|h,a] is fitted too, and the one with the larger within-content human-anchored
+      validity on the VALIDATION split is used (the other is the ablation arm).  Both carry a frozen
+      length correction, so the estimand is the phrasing effect at fixed content AND length.
 
   (3) Information-fidelity and length constraints.  Completeness P_ent(response => source) and
       consistency 1 - P_contra(source => response) come from an NLI cross-encoder.  Empathetic
@@ -49,7 +70,7 @@ The algorithm (four estimators and one constrained policy-gradient update)
   (4) PACE update, a feasible-set, leave-one-out group-relative advantage with Lagrangian duals:
             F_g        = { i in group g : hygienic, no fabrication, fidelity f_i >= f_min }
             A_aff_i    = (r_i - mean_{j in F_g, j != i} r_j) / s     for i in F_g, else 0
-                         (set to 0 when the spread of F_g is inside the ensemble's own sd)
+                         (scaled by the group's ensemble reliability w_g in [0, 1])
             A_con_i    = -lam_f (v_f,i - mean_{j != i} v_f,j) - lam_len (v_len,i - mean_{j != i} v_len,j)
             A_i        = clip(A_aff_i + A_con_i),   hygiene failures get -bad_penalty
             lam        <- [lam + eta (mean violation - epsilon)]_+   (projected dual ascent)
@@ -99,7 +120,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-VERSION = "pace-1.0"
+VERSION = "pace-1.1"
 EPS = 1e-12
 
 ZENODO_FILES = {
@@ -121,10 +142,11 @@ HELDOUT_TAILS = ("That is the information I have on this.", "Those are the detai
                  "That covers the points you raised.", "This is the current status as it stands.")
 
 REWRITE_SYSTEM = ("You are a customer-service agent. You are given the conversation so far and a draft reply that "
-                  "contains the information the customer must receive. Write the reply you will actually send: "
-                  "keep every fact, number, name, time and reference code of the draft, do not add new facts or "
-                  "promises, and phrase it so that it is emotionally appropriate for this customer. Output only "
-                  "the reply.")
+                  "contains the information the customer must receive. Write the reply you will actually send. "
+                  "Keep every fact, number, name, time and reference code of the draft; do not drop, change or add "
+                  "facts, offers or promises. Phrase it so that it is emotionally appropriate for this customer, "
+                  "and keep it about as long as the draft (at most one short extra sentence). Output only the "
+                  "reply.")
 
 ROLE_LEAK_RE = re.compile(r"(?im)^\s*(customer|user|agent|system|assistant)\s*:")
 TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
@@ -413,8 +435,18 @@ def is_bad_news(t: Turn) -> bool:
     return any(k in d for k in ("nobook", "nooffer", "negative_outcome"))
 
 
+_NUM_WORDS = {w: str(i) for i, w in enumerate(
+    ["zero", "", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+     "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"]) if w}
+_NUM_WORDS.update({"thirty": "30", "forty": "40", "fifty": "50"})
+_NUM_WORD_RE = re.compile(r"\b(" + "|".join(_NUM_WORDS) + r")\b", re.I)
+
+
 def entities(text: str) -> set:
-    s = norm_text(text)
+    """Numbers, times, reference codes and postcodes.  Number words (two..fifty) become digits so that
+    "two people" and "2 people" match; "one" is left alone ("one moment" is not a quantity)."""
+    s = _NUM_WORD_RE.sub(lambda m: _NUM_WORDS[m.group(1).lower()], norm_text(text))
+    s = re.sub(r"(\d)(am|pm|a\.m\.|p\.m\.)(?![a-z])", r"\1 \2", s, flags=re.I)     # "10:30am" -> "10:30 am"
     out = {m.group(0).lower() for m in TIME_RE.finditer(s)}
     out |= {m.group(0).lower() for m in NUM_RE.finditer(s)}
     out |= {m.group(0).lower() for m in REF_RE.finditer(s)}
@@ -422,9 +454,11 @@ def entities(text: str) -> set:
     return out
 
 
-def fabricated_entities(src: str, resp: str) -> set:
-    """Numbers, times, reference codes and postcodes stated in the response but absent from the source."""
-    return entities(resp) - entities(src)
+def fabricated_entities(src: str, resp: str, context: str = "") -> set:
+    """Entities in the response that are grounded neither in the draft nor in the conversation.  v1.0 compared
+    against the draft only, so restating "for 4 people at 18:30" from the customer's own turn counted as
+    fabrication; the first real run flagged 75% of rewrites that way and starved the feasible set."""
+    return entities(resp) - entities(src) - entities(context)
 
 
 def hygiene_ok(text: str, min_words: int = 3, max_words: int = 120, require_terminal: bool = True
@@ -575,7 +609,7 @@ class PACEConfig:
     steps: int = 300
     n_contexts: int = 8
     group_size: int = 8
-    lr: float = 1e-5
+    lr: float = 5e-6
     temperature: float = 1.0
     top_p: float = 0.95
     max_new_tokens: int = 160         # room for (1 + len_slack) x a 50-word source; also the Dr. GRPO constant
@@ -585,24 +619,27 @@ class PACEConfig:
     micro: int = 8
     clip: float = 0.2
     max_grad_norm: float = 1.0
-    kl_coef: float = 0.05
-    kl_target: float = 0.05          # per-token k3 KL to the frozen base model
-    kl_coef_min: float = 0.005
-    kl_coef_max: float = 1.0
-    kl_abort: float = 20.0           # abort when KL exceeds this multiple of the target
-    kappa: float = 1.0               # pessimism: reward = mean - kappa * ensemble sd
-    snr_kappa: float = 1.0           # affect advantage only if the group spread exceeds this x ensemble sd
-    adv_clip: float = 5.0
+    target_step_kl: float = 0.02      # stop the inner PPO epochs once KL(old || new) per token exceeds this
+    kl_coef: float = 0.1              # initial beta of the k3 KL penalty to the frozen base model
+    kl_target: float = 0.05           # per-token on-policy KL(pi || ref) the controller aims at
+    kl_k: float = 0.2                 # proportional gain of the KL controller (Ziegler et al., 2019)
+    kl_coef_min: float = 0.02
+    kl_coef_max: float = 2.0
+    kl_abort: float = 6.0             # trust-region guard: roll back when on-policy KL > kl_abort x target
+    max_rollbacks: int = 3
+    min_reliability: float = 0.1      # affect advantage only if the ensemble reliability of the group exceeds this
+    adv_clip: float = 3.0
     scale_floor: float = 1e-3
-    bad_penalty: float = 1.0         # fixed advantage for hygiene failures (outside all group statistics)
-    f_min: float = 0.5               # fidelity needed to enter the feasible (content-equivalent) set
-    eps_fid: float = 0.15            # constraint: mean fidelity violation <= eps_fid
-    len_slack: float = 0.6           # free length budget: up to (1 + slack) x source words
-    eps_len: float = 0.03            # constraint: mean log-length overrun <= eps_len
-    dual_lr: float = 1.0
+    v_scale_floor: float = 0.05
+    bad_penalty: float = 1.0          # fixed advantage for hygiene failures (outside all group statistics)
+    f_min: float = 0.5                # fidelity needed to enter the feasible (content-equivalent) set
+    eps_fid: float = 0.15             # constraint: mean fidelity violation <= eps_fid
+    len_slack: float = 0.6            # free length budget: up to (1 + slack) x source words
+    eps_len: float = 0.03             # constraint: mean log-length overrun <= eps_len
+    dual_lr: float = 0.1
     lam_f0: float = 1.0
-    lam_len0: float = 1.0
-    lam_max: float = 20.0
+    lam_len0: float = 0.5
+    lam_max: float = 5.0
     log_every: int = 10
     min_words: int = 3
     max_words: int = 120
@@ -632,7 +669,7 @@ class Config:
     label_source: str = "detector"   # "detector" (deployment-faithful) or "human" (upper bound)
     n_heads: int = 5
     crossfit_folds: int = 2
-    fit_naive_reward: bool = True
+    effect_epochs: int = 3
     sent_beta_grid: Tuple[float, ...] = (0.0, 0.1, 0.25, 0.5, 1.0)
     gate_max_turns: int = 4000
     n_boot: int = 1000
@@ -641,7 +678,7 @@ class Config:
     rl_contexts: int = 20000
     eval_turns: int = 800
     eval_temperature: float = 0.7
-    arms: Tuple[str, ...] = ("pace", "pace_unconstrained", "pace_naive_reward", "sentiment_only")
+    arms: Tuple[str, ...] = ("pace", "pace_unconstrained", "pace_alt_reward", "sentiment_only")
     fidelity_ni_margin: float = 0.03
 
 
@@ -934,21 +971,66 @@ class NLIEngine:
         return {"f": p_complete * (1.0 - p_contra), "complete": p_complete, "contra": p_contra}
 
 
+@dataclass
+class LengthBasis:
+    """Piecewise-linear basis in clamped log word count (hinges at the quartiles).  Clamping to the 1-99%
+    range means a correction can never be extrapolated by producing unusually short or long responses."""
+    lo: float
+    hi: float
+    knots: List[float]
+
+    @staticmethod
+    def fit(L: np.ndarray) -> "LengthBasis":
+        L = np.asarray(L, float)
+        lo, hi = float(np.quantile(L, 0.01)), float(np.quantile(L, 0.99))
+        Lc = np.clip(L, lo, hi)
+        return LengthBasis(lo, hi, [float(q) for q in np.quantile(Lc, [0.25, 0.5, 0.75])])
+
+    def __call__(self, L: np.ndarray) -> np.ndarray:
+        Lc = np.clip(np.asarray(L, float), self.lo, self.hi)
+        return np.column_stack([Lc] + [np.maximum(0.0, Lc - k) for k in self.knots])
+
+
+def loglen(texts: Sequence[str]) -> np.ndarray:
+    return np.log1p(np.asarray([n_words(x) for x in texts], float))
+
+
 class AffectReward:
-    """Bootstrapped-head ensemble g(h, a) in outcome units: returns (head mean, head sd)."""
+    """Bootstrapped-head ensemble in outcome units, minus a frozen length correction.
+
+    The correction B(L) gamma is the reward's own length trend net of context and content (fitted on the
+    validation split by regressing the reward on [1, m0, B(L)]).  The first real run showed why it is needed:
+    partial rho(reward, log-length | m) = -0.377 while the HUMAN labels give -0.043, i.e. the reward had learnt a
+    brevity shortcut the humans do not support.  The estimand is therefore the phrasing effect at fixed
+    content AND fixed length; length itself is governed only by the explicit budget constraint in RL."""
 
     def __init__(self, path: Path, cfg: Config, device: str):
         self.model, meta = load_text_model(path, cfg, device)
         self.tok = load_tokenizer(meta["backbone"], cfg)
         self.y_mu, self.y_sd = float(meta["y_mu"]), float(meta["y_sd"])
         self.cfg, self.device = cfg, device
+        self.basis: Optional[LengthBasis] = None
+        self.gamma: Optional[np.ndarray] = None
+        corr = Path(path).with_suffix(".lencorr.json")
+        if corr.exists():
+            self.set_length_correction(**load_json(corr))
 
-    def __call__(self, turns: Sequence[Turn], responses: Sequence[str]) -> Tuple[np.ndarray, np.ndarray]:
+    def set_length_correction(self, basis: Dict[str, Any], gamma: Sequence[float]) -> None:
+        self.basis = LengthBasis(float(basis["lo"]), float(basis["hi"]), list(basis["knots"]))
+        self.gamma = np.asarray(gamma, float)
+
+    def heads(self, turns: Sequence[Turn], responses: Sequence[str]) -> np.ndarray:
         out = predict_text_model(self.model, self.tok, [context_text(t, self.cfg.ctx_utts) for t in turns],
                                  [norm_text(r) for r in responses], self.cfg.fit.max_len, self.device,
                                  self.cfg.fit.pred_batch)
         out = out * self.y_sd + self.y_mu
-        return out.mean(1), (out.std(1) if out.shape[1] > 1 else np.zeros(len(out)))
+        if self.basis is not None and self.gamma is not None:
+            out = out - (self.basis(loglen(responses)) @ self.gamma)[:, None]
+        return out
+
+    def __call__(self, turns: Sequence[Turn], responses: Sequence[str]) -> Tuple[np.ndarray, np.ndarray]:
+        h = self.heads(turns, responses)
+        return h.mean(1), (h.std(1) if h.shape[1] > 1 else np.zeros(len(h)))
 
 
 class Judge:
@@ -973,59 +1055,108 @@ class Judge:
 # ----------------------------------------------------------------------------------------------------------
 
 def _loo_centre(x: np.ndarray) -> np.ndarray:
-    """x_i - mean_{j != i} x_j = n/(n-1) (x_i - mean x): the leave-one-out (RLOO) baseline."""
-    n = x.size
-    return np.zeros_like(x) if n < 2 else (x - x.mean()) * n / (n - 1.0)
+    """x_i - mean_{j != i} x_j = n/(n-1) (x_i - mean x) along axis 0: the leave-one-out (RLOO) baseline."""
+    n = x.shape[0]
+    return np.zeros_like(x) if n < 2 else (x - x.mean(0)) * n / (n - 1.0)
 
 
-def pace_advantages(r: np.ndarray, r_sd: np.ndarray, gid: np.ndarray, hygienic: np.ndarray, feasible: np.ndarray,
-                    v_f: np.ndarray, v_len: np.ndarray, lam_f: float, lam_len: float, r_scale: float,
-                    snr_kappa: float = 1.0, adv_clip: float = 5.0, bad_penalty: float = 1.0) -> Dict[str, Any]:
-    """Feasible-set leave-one-out advantages with Lagrangian constraint terms (see module docstring)."""
-    r, r_sd = np.asarray(r, float), np.asarray(r_sd, float)
+def pace_advantages(heads: np.ndarray, gid: np.ndarray, hygienic: np.ndarray, feasible: np.ndarray,
+                    V: np.ndarray, lam: Sequence[float], v_scale: Sequence[float], r_scale: float,
+                    min_reliability: float = 0.1, adv_clip: float = 3.0, bad_penalty: float = 1.0) -> Dict[str, Any]:
+    """Feasible-set leave-one-out advantages with reliability weighting and scale-free Lagrangian terms.
+
+      affect   : inside the feasible set F_g, centre every ensemble head leave-one-out, average over heads
+                 (c_i) and estimate the standard error of that average from the head spread (se_i^2).  The
+                 group reliability w_g = s2 / (s2 + mean se^2), with s2 = max(0, Var_i c_i - mean se^2), is the
+                 share of the within-group reward spread that is signal rather than ensemble noise (an
+                 ICC-type coefficient).  A_aff = w_g c_i / r_scale.  v1.0 compared the raw spread with the
+                 per-head sd instead of the sd of the head MEAN, which is sqrt(H) too strict, and gated whole
+                 groups on/off; the first run gated 6 of 8 groups by step 20.
+      constraint: A_con = -sum_k lam_k LOO(v_k) / s_k with s_k the running within-group sd of violation k, so
+                 lam = 1 trades one sd of violation against one sd of affect.  v1.0 used raw violations with
+                 lam up to 20, which let the constraint terms saturate the advantage clip and drive the KL
+                 blow-up seen at step 22."""
+    H = np.asarray(heads, float)
+    H = H[:, None] if H.ndim == 1 else H
     gid = np.asarray(gid)
-    hyg, feas = np.asarray(hygienic, bool), np.asarray(feasible, bool) & np.asarray(hygienic, bool)
-    v_f, v_len = np.asarray(v_f, float), np.asarray(v_len, float)
-    a_aff = np.zeros_like(r)
-    a_con = np.zeros_like(r)
+    hyg = np.asarray(hygienic, bool)
+    feas = np.asarray(feasible, bool) & hyg
+    V = np.asarray(V, float)
+    V = V[:, None] if V.ndim == 1 else V
+    lam = np.asarray(lam, float)
+    vs = np.maximum(np.asarray(v_scale, float), 1e-8)
+    n = H.shape[0]
+    a_aff, a_con = np.zeros(n), np.zeros(n)
     n_groups = n_gated = n_affect = 0
-    spreads = []
+    spreads, rel, vsd = [], [], []
     for g in np.unique(gid):
         m = np.flatnonzero(gid == g)
         n_groups += 1
         h = m[hyg[m]]
-        if h.size >= 2:                                  # constraint terms among hygienic samples
-            a_con[h] = -(lam_f * _loo_centre(v_f[h]) + lam_len * _loo_centre(v_len[h]))
+        if h.size >= 2:
+            a_con[h] = -(_loo_centre(V[h]) / vs[None, :]) @ lam
+            vsd.append(V[h].std(0))
         f = m[feas[m]]
         if f.size < 2:
             continue
-        rf = r[f]
-        spread = float(rf.max() - rf.min())
-        spreads.append(float(rf.std()))
-        if snr_kappa > 0 and spread <= snr_kappa * float(np.mean(r_sd[f])):
-            n_gated += 1                                 # spread inside the model's own uncertainty
+        C = _loo_centre(H[f])
+        c = C.mean(1)
+        tot = float(np.var(c, ddof=1))
+        if H.shape[1] > 1:
+            noise = float(np.mean(C.var(1, ddof=1) / H.shape[1]))
+            sig = max(0.0, tot - noise)
+            w = sig / (sig + noise) if sig + noise > 0 else 0.0
+        else:
+            w = 1.0 if tot > 0 else 0.0
+        rel.append(w)
+        spreads.append(float(np.std(c)))
+        if w < min_reliability:
+            n_gated += 1
             continue
         n_affect += 1
-        a_aff[f] = _loo_centre(rf) / max(float(r_scale), 1e-8)
+        a_aff[f] = w * c / max(float(r_scale), 1e-8)
     adv = np.clip(a_aff + a_con, -adv_clip, adv_clip)
     adv[~hyg] = -abs(bad_penalty)
     return {"adv": adv, "a_aff": a_aff, "a_con": a_con, "n_groups": n_groups, "n_gated": n_gated,
-            "n_affect_groups": n_affect, "within_sd": float(np.mean(spreads)) if spreads else float("nan")}
+            "n_affect_groups": n_affect, "within_sd": float(np.mean(spreads)) if spreads else float("nan"),
+            "reliability": float(np.mean(rel)) if rel else float("nan"),
+            "v_sd": np.mean(vsd, 0) if vsd else np.full(V.shape[1], np.nan)}
 
 
 @dataclass
 class DualVariable:
-    """Projected dual ascent on a mean-violation constraint E[v] <= target."""
+    """Projected dual ascent on E[v] <= target, driven by an EMA of the batch violation (damps the overshoot
+    that per-batch updates with a large step produced in the first run: lam_f 1.6 -> 6.3 in 20 steps)."""
     target: float
     lr: float
     lam: float
-    lam_max: float = 20.0
+    lam_max: float = 5.0
     frozen: bool = False
+    ema: float = float("nan")
 
     def update(self, mean_violation: float) -> float:
         if not self.frozen and math.isfinite(mean_violation):
-            self.lam = float(np.clip(self.lam + self.lr * (mean_violation - self.target), 0.0, self.lam_max))
+            self.ema = mean_violation if not math.isfinite(self.ema) else 0.8 * self.ema + 0.2 * mean_violation
+            self.lam = float(np.clip(self.lam + self.lr * (self.ema - self.target), 0.0, self.lam_max))
         return self.lam
+
+
+@dataclass
+class KLController:
+    """Proportional KL controller (Ziegler et al., 2019) on the ON-POLICY per-token KL to the reference, with a
+    faster upward than downward response.  v1.0 multiplied beta by 0.75 per step whenever KL was small, which
+    drove beta from 0.05 to 0.0067 in ten steps just before the KL exploded."""
+    beta: float
+    target: float
+    k: float = 0.2
+    lo: float = 0.02
+    hi: float = 2.0
+
+    def update(self, kl: float) -> float:
+        if math.isfinite(kl):
+            e = float(np.clip(kl / max(self.target, 1e-8) - 1.0, -0.2, 1.0))
+            self.beta = float(np.clip(self.beta * (1.0 + self.k * e), self.lo, self.hi))
+        return self.beta
 
 
 def length_overrun(src: Sequence[str], resp: Sequence[str], slack: float) -> np.ndarray:
@@ -1194,19 +1325,24 @@ class PolicyLM:
         return out
 
     def ppo_update(self, samples: Sequence[Sample], adv: np.ndarray, old: List[np.ndarray], ref: List[np.ndarray],
-                   opt, pc: PACEConfig, kl_coef: float, rng: np.random.Generator) -> Dict[str, float]:
+                   opt, pc: PACEConfig, kl_coef: float, rng: np.random.Generator) -> Dict[str, Any]:
         """PPO-clip with a k3 KL penalty; token terms are SUMMED per sequence and divided by the constant
-        max_new_tokens (Dr. GRPO), so no length-dependent weighting is introduced."""
+        max_new_tokens (Dr. GRPO), so no length-dependent weighting is introduced.  Inner epochs stop as soon as
+        the per-token KL(old || new) of a minibatch exceeds target_step_kl (the minibatch whose forward reveals
+        the excess is not applied), which bounds how far one batch can move the policy."""
         import torch
         N = len(samples)
         L = float(pc.max_new_tokens)
         stats = {"kl": 0.0, "clipfrac": 0.0, "tokens": 0.0, "pg": 0.0}
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        n_updates, stopped, approx = 0, False, 0.0
         self.model.train()
         for _ in range(pc.ppo_epochs):
             perm = rng.permutation(N)
             for s in range(0, N, pc.minibatch):
                 mb = perm[s:s + pc.minibatch]
                 opt.zero_grad(set_to_none=True)
+                akl_num = akl_den = 0.0
                 for u in range(0, len(mb), pc.micro):
                     ix = mb[u:u + pc.micro]
                     sub = [samples[i] for i in ix]
@@ -1219,21 +1355,33 @@ class PolicyLM:
                         old_t[r, Tm - k:] = torch.as_tensor(old[i], device=lp.device)
                         ref_t[r, Tm - k:] = torch.as_tensor(ref[i], device=lp.device)
                     A = torch.as_tensor(adv[ix], dtype=torch.float32, device=lp.device)[:, None]
-                    ratio = torch.exp((lp - old_t) * mask)
+                    logr = (lp - old_t) * mask
+                    ratio = torch.exp(logr)
                     pg = -torch.min(ratio * A, torch.clamp(ratio, 1 - pc.clip, 1 + pc.clip) * A)
                     d = (ref_t - lp) * mask
                     kl = torch.exp(d) - d - 1.0
                     loss = ((pg + kl_coef * kl) * mask).sum() / (len(mb) * L)
                     loss.backward()
-                    stats["kl"] += float((kl * mask).sum().detach())
-                    stats["pg"] += float((pg * mask).sum().detach())
-                    stats["clipfrac"] += float(((torch.abs(ratio - 1) > pc.clip).float() * mask).sum().detach())
-                    stats["tokens"] += float(mask.sum().detach())
-                torch.nn.utils.clip_grad_norm_([p for p in self.model.parameters() if p.requires_grad],
-                                               pc.max_grad_norm)
+                    with torch.no_grad():
+                        akl_num += float((((ratio - 1.0) - logr) * mask).sum())
+                        akl_den += float(mask.sum())
+                        stats["kl"] += float((kl * mask).sum())
+                        stats["pg"] += float((pg * mask).sum())
+                        stats["clipfrac"] += float(((torch.abs(ratio - 1) > pc.clip).float() * mask).sum())
+                        stats["tokens"] += float(mask.sum())
+                approx = akl_num / max(1.0, akl_den)
+                if approx > pc.target_step_kl:
+                    opt.zero_grad(set_to_none=True)
+                    stopped = True
+                    break
+                torch.nn.utils.clip_grad_norm_(params, pc.max_grad_norm)
                 opt.step()
+                n_updates += 1
+            if stopped:
+                break
         tok = max(1.0, stats["tokens"])
-        return {"kl": stats["kl"] / tok, "clipfrac": stats["clipfrac"] / tok, "pg": stats["pg"] / tok}
+        return {"kl": stats["kl"] / tok, "clipfrac": stats["clipfrac"] / tok, "pg": stats["pg"] / tok,
+                "updates": n_updates, "stopped_early": stopped, "approx_kl": approx}
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -1352,7 +1500,44 @@ def _outcome(t: Turn, labels: Dict[str, float], source: str) -> Optional[float]:
     return t.human_utility if source == "human" else labels.get(t.uid)
 
 
+def _ols(X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    return np.linalg.lstsq(np.column_stack([np.ones(len(X)), X]), y, rcond=None)[0]
+
+
+def reward_diagnostics(r: np.ndarray, u: np.ndarray, m0: np.ndarray, mL: np.ndarray, L: np.ndarray,
+                       strata: np.ndarray, cl: np.ndarray, bad: np.ndarray, n_boot: int, seed: int) -> Dict[str, Any]:
+    """Human-anchored validity of a reward on a labelled split.
+      within_content : rank partial rho(r, human | mL) inside content strata  (the GATE / selection criterion)
+      pooled_partial : the same without strata
+      length_partial : rank partial rho(r, log-length | m0), to compare with the human value
+      bad_news_smd   : (mean r | bad news - mean r | other) / sd(r)
+      rho_m          : rho(r, m0), ~0 when the reward is orthogonal to context and content"""
+    def boot(fn, sd):
+        return cluster_bootstrap_ci(fn, cl, n_boot, sd)
+    s = float(np.std(r)) or 1.0
+    in_strata = int(np.sum(np.bincount(np.unique(strata, return_inverse=True)[1])[np.unique(
+        strata, return_inverse=True)[1]] >= 2))
+    return {
+        "within_content": boot(lambda ix: stratified_partial_spearman(r[ix], u[ix], mL[ix], strata[ix]), seed),
+        "n_in_multi_strata": in_strata,
+        "pooled_partial": boot(lambda ix: partial_spearman(r[ix], u[ix], mL[ix]), seed + 1),
+        "length_partial": partial_spearman(r, L, m0),
+        "bad_news_smd": boot(lambda ix: (float(np.mean(r[ix][bad[ix]])) - float(np.mean(r[ix][~bad[ix]]))) / s
+                             if bad[ix].any() and (~bad[ix]).any() else float("nan"), seed + 2),
+        "rho_m": spearman(r, m0),
+    }
+
+
 def stage_reward(cfg: Config) -> Dict[str, Any]:
+    """Two reward candidates, one pre-registered selection rule, one gate.
+
+      reward_g    : content-orthogonal phrasing effect, g fitted on y - m_L(h, c, L) (cross-fitted nuisance)
+      reward_full : direct outcome model E[S | h, a]
+    Inside a content-equivalent GRPO group both rank candidates by the same population quantity; they differ in
+    estimation error.  The first real run found the direct model MORE valid within content (+0.140 vs +0.104),
+    so the choice is made on data: the candidate with the larger within-content human-anchored partial rho on
+    the VALIDATION split is used for RL, the other becomes the 'pace_alt_reward' ablation, and only the
+    selected one is gated on TEST.  Both carry the frozen length correction (see AffectReward)."""
     ex = Experiment(cfg, "2_reward")
     lg, dev = ex.logger, cfg.device
     labels = load_json(cfg.out / "detector_labels.json") if cfg.label_source == "detector" else {}
@@ -1371,6 +1556,7 @@ def stage_reward(cfg: Config) -> Dict[str, Any]:
     ctx = lambda ts: [context_text(t, cfg.ctx_utts) for t in ts]           # noqa: E731
     cdesc = lambda ts: [content_descriptor(t) for t in ts]                  # noqa: E731
     resp = lambda ts: [t.agent_text for t in ts]                            # noqa: E731
+    L_R, L_V, L_T = loglen(resp(R)), loglen(resp(V)), loglen(resp(T))
 
     # (a) nuisance m(h, c), K-fold cross-fitted by dialogue.
     folds = dialogue_folds([t.dialogue_id for t in R], cfg.crossfit_folds, cfg.seed)
@@ -1395,121 +1581,106 @@ def stage_reward(cfg: Config) -> Dict[str, Any]:
                 m_T += pred / cfg.crossfit_folds
         del mk
         free_cuda()
-    # Linear recalibration of the out-of-fold nuisance (2 parameters, fitted on honest OOF predictions).  An
-    # early-stopped regressor is shrunk towards the mean (m_hat ~ alpha * m, alpha < 1); the residual then keeps
-    # (1 - alpha) * m, i.e. context/content signal leaks into tau and tau correlates with m_hat.  OLS of y on
-    # m_hat_oof undoes the shrinkage.
-    cal_b = float(np.cov(m_oof, yR, ddof=1)[0, 1] / max(float(np.var(m_oof, ddof=1)), EPS))
-    cal_a = float(np.mean(yR) - cal_b * np.mean(m_oof))
-    m_oof, m_V, m_T = cal_a + cal_b * m_oof, cal_a + cal_b * m_V, cal_a + cal_b * m_T
-    resid = yR - m_oof
-    r2_m = 1.0 - float(np.var(resid)) / max(float(np.var(yR)), EPS)
-    lg.info("nuisance m(h,c) | out-of-fold R2 %.4f after recalibration (slope %.3f; >1 means the raw fit was "
-            "shrunk) | residual sd %.4f vs outcome sd %.4f -- the variance share that context and content "
-            "explain, which GRPO groups cancel anyway", r2_m, cal_b, float(np.std(resid)), float(np.std(yR)))
+    # Honest recalibration on the out-of-fold predictions (a few parameters):
+    #   m0 = a + b m_hat                 context + content baseline (diagnostics)
+    #   mL = a + b m_hat + B(L) gamma    context + content + length baseline (residual targets and the gate)
+    lb = LengthBasis.fit(L_R)
+    c0 = _ols(m_oof[:, None], yR)
+    cL = _ols(np.column_stack([m_oof, lb(L_R)]), yR)
+    m0 = {k: c0[0] + c0[1] * v for k, v in (("R", m_oof), ("V", m_V), ("T", m_T))}
+    mL = {k: cL[0] + np.column_stack([v, lb(LL)]) @ cL[1:] for k, v, LL in
+          (("R", m_oof, L_R), ("V", m_V, L_V), ("T", m_T, L_T))}
+    resid = yR - mL["R"]
+    r2_0 = 1.0 - float(np.var(yR - m0["R"])) / max(float(np.var(yR)), EPS)
+    r2_L = 1.0 - float(np.var(resid)) / max(float(np.var(yR)), EPS)
+    Vh = np.asarray([t.human_utility is not None for t in V], bool)
+    uV = np.asarray([t.human_utility if t.human_utility is not None else np.nan for t in V], float)
+    lg.info("nuisance | out-of-fold R2: context+content %.4f (slope %.3f), + length %.4f | pseudo-label length "
+            "partial rho %+.4f vs HUMAN %+.4f on the validation split (a gap means the pseudo-labels carry a length "
+            "artefact)", r2_0, c0[1], r2_L, partial_spearman(yV, L_V, m0["V"]),
+            partial_spearman(uV[Vh], L_V[Vh], m0["V"][Vh]))
 
-    # (b) effect model g(h, a) on residuals, M Poisson-bootstrapped heads (and the naive ablation on raw S).
+    # (b) two candidates, each with a frozen length correction fitted on V (no labels involved).
     rng = np.random.default_rng(cfg.seed + 7)
-
-    def fit_effect(target_R: np.ndarray, target_V: np.ndarray, name: str) -> Tuple[Any, Dict[str, Any]]:
+    fe = FitConfig(**{**asdict(cfg.fit), "epochs": cfg.effect_epochs})
+    targets = {"reward_g": (resid, yV - mL["V"]), "reward_full": (yR, yV)}
+    engines: Dict[str, AffectReward] = {}
+    for name, (tR, tV) in targets.items():
         g = build_text_model(cfg.encoder_model, cfg.n_heads, cfg)
         W = rng.poisson(1.0, size=(len(R), cfg.n_heads)).astype(np.float32)
-        res = fit_text_model(g, tok, {"a": ctx(R), "b": resp(R), "y": target_R, "w": W},
-                             {"a": ctx(V), "b": resp(V), "y": target_V}, "mse", cfg.fit, dev, lg, name, cfg.seed + 11)
+        res = fit_text_model(g, tok, {"a": ctx(R), "b": resp(R), "y": tR, "w": W},
+                             {"a": ctx(V), "b": resp(V), "y": tV}, "mse", fe, dev, lg, name, cfg.seed + 11)
         save_text_model(g, cfg.out / f"{name}.pt", {"backbone": cfg.encoder_model, "n_out": cfg.n_heads,
                                                     "y_mu": res["y_mu"], "y_sd": res["y_sd"]})
-        return g, res
-
-    g, g_res = fit_effect(resid, yV - m_V, "reward_g")
-    del g
-    free_cuda()
-    reward = AffectReward(cfg.out / "reward_g.pt", cfg, dev)
-    tau, tau_sd = reward(T, resp(T))
-    naive = None
-    if cfg.fit_naive_reward:
-        g0, _ = fit_effect(yR, yV, "reward_naive")
-        del g0
+        del g
         free_cuda()
-        naive = AffectReward(cfg.out / "reward_naive.pt", cfg, dev)
+        eng = AffectReward(cfg.out / f"{name}.pt", cfg, dev)
+        rv, _ = eng(V, resp(V))
+        coef = _ols(np.column_stack([m0["V"], lb(L_V)]), rv)
+        corr = {"basis": asdict(lb), "gamma": coef[2:].tolist()}
+        dump_json(corr, (cfg.out / f"{name}.pt").with_suffix(".lencorr.json"))
+        eng.set_length_correction(**corr)
+        engines[name] = eng
+        lg.info("%s | raw length slope net of context/content removed: gamma %s", name,
+                np.round(coef[2:], 5).tolist())
 
-    # (c) validity gate on the TEST split, against HUMAN labels the reward never saw.
+    # (c) pre-registered selection on the VALIDATION split (human-labelled subset).
+    stV = np.asarray([content_descriptor(t) for t in V])
+    sel_score = {}
+    for name, eng in engines.items():
+        rv, _ = eng(V, resp(V))
+        sel_score[name] = stratified_partial_spearman(rv[Vh], uV[Vh], mL["V"][Vh], stV[Vh])
+    selected = max(sel_score, key=lambda k: sel_score[k] if math.isfinite(sel_score[k]) else -2.0)
+    alternative = next(k for k in engines if k != selected)
+    lg.info("selection on VALIDATION (n=%d human-labelled) | within-content partial rho: %s -> using %s for RL, "
+            "%s as the ablation", int(Vh.sum()), {k: round(v, 4) for k, v in sel_score.items()}, selected, alternative)
+
+    # (d) gate and diagnostics on TEST (human labels never used for fitting or selection).
     u = np.asarray([t.human_utility for t in T], float)
     cl = np.asarray([t.dialogue_id for t in T])
-    L = np.log1p([n_words(t.agent_text) for t in T])
     bad = np.asarray([is_bad_news(t) for t in T], bool)
-    B = cfg.n_boot
-    gate: Dict[str, Any] = {"n": len(T)}
-
     strata = np.asarray([content_descriptor(t) for t in T])
-
-    def pci(x, y, z, seed):
-        return cluster_bootstrap_ci(lambda ix: partial_spearman(x[ix], y[ix], z[ix]), cl, B, seed)
-
-    def spci(x, y, z, seed):
-        return cluster_bootstrap_ci(lambda ix: stratified_partial_spearman(x[ix], y[ix], z[ix], strata[ix]), cl, B,
-                                    seed)
-
-    # GATE: within the same content (content fixed effects) and given m_hat, does tau predict the HUMAN label?
-    # This is specific to phrasing: content signal that m_hat failed to absorb cannot pass it.
-    gate["tau_within_content_rho"] = spci(tau, u, m_T, cfg.seed + 9)
-    gate["n_content_strata"] = int(np.unique(strata).size)
-    gate["tau_partial_rho"] = pci(tau, u, m_T, cfg.seed)
-    gate["m_rho"] = spearman(m_T, u)
-    gate["m_plus_tau_rho"] = spearman(m_T + tau, u)
-    gate["tau_m_rho"] = spearman(tau, m_T)
-    gate["length_partial_rho_tau"] = partial_spearman(tau, L, m_T)
-    gate["length_partial_rho_human"] = partial_spearman(u, L, m_T)
-
-    def smd(x):
-        s = float(np.std(x)) or 1.0
-        return cluster_bootstrap_ci(lambda ix: (float(np.mean(x[ix][bad[ix]])) - float(np.mean(x[ix][~bad[ix]]))) / s
-                                    if bad[ix].any() and (~bad[ix]).any() else float("nan"), cl, B, cfg.seed + 3)
-
-    gate["bad_news_smd_tau"] = smd(tau)
-    gate["bad_news_smd_human"] = smd(u)
+    diag = {}
+    for i, (name, eng) in enumerate(engines.items()):
+        rt, _ = eng(T, resp(T))
+        diag[name] = reward_diagnostics(rt, u, m0["T"], mL["T"], L_T, strata, cl, bad, cfg.n_boot, cfg.seed + 20 * i)
+    human = {"length_partial": partial_spearman(u, L_T, m0["T"]),
+             "bad_news_smd": cluster_bootstrap_ci(
+                 lambda ix: (float(np.mean(u[ix][bad[ix]])) - float(np.mean(u[ix][~bad[ix]]))) / (float(np.std(u)) or 1)
+                 if bad[ix].any() and (~bad[ix]).any() else float("nan"), cl, cfg.n_boot, cfg.seed + 90)}
     pr = np.random.default_rng(cfg.seed + 5)
     padded = [f"{t.agent_text} {HELDOUT_TAILS[int(pr.integers(len(HELDOUT_TAILS)))]}" for t in T]
-    tau_pad, _ = reward(T, padded)
-    sd_tau = float(np.std(tau)) or 1.0
-    dpad = (tau_pad - tau) / sd_tau
-    gate["padding_shift_sd"] = cluster_bootstrap_ci(lambda ix: float(np.mean(dpad[ix])), cl, B, cfg.seed + 6, conf=0.90)
-    if naive is not None:
-        g0, _ = naive(T, resp(T))
-        gate["naive_partial_rho"] = pci(g0, u, m_T, cfg.seed + 1)
-        gate["naive_within_content_rho"] = spci(g0, u, m_T, cfg.seed + 10)
-        gate["naive_rho"] = spearman(g0, u)
-        gate["bad_news_smd_naive"] = smd(g0)
-    lo = gate["tau_within_content_rho"][1]
-    gate["passes"] = bool(math.isfinite(lo) and lo > 0.0)
+    r_sel, _ = engines[selected](T, resp(T))
+    r_pad, _ = engines[selected](T, padded)
+    dpad = (r_pad - r_sel) / (float(np.std(r_sel)) or 1.0)
+    pad = cluster_bootstrap_ci(lambda ix: float(np.mean(dpad[ix])), cl, cfg.n_boot, cfg.seed + 6, conf=0.90)
+    lo = diag[selected]["within_content"][1]
+    passes = bool(math.isfinite(lo) and lo > 0.0)
     f3 = lambda c: f"{c[0]:+.4f} CI[{c[1]:+.4f},{c[2]:+.4f}]"   # noqa: E731
-    lg.info("VALIDITY (test split, human labels, n=%d, %d content strata) | within-content partial rho(tau, human "
-            "| m) = %s <- gate | pooled partial rho %s | rho(m, human) %+.4f | rho(m+tau, human) %+.4f | rho(tau, m) "
-            "%+.4f (~0 if orthogonal)", len(T), gate["n_content_strata"], f3(gate["tau_within_content_rho"]),
-            f3(gate["tau_partial_rho"]), gate["m_rho"], gate["m_plus_tau_rho"], gate["tau_m_rho"])
-    lg.info("  bad-news standardised difference: tau %s | human %s%s", f3(gate["bad_news_smd_tau"]),
-            f3(gate["bad_news_smd_human"]),
-            f" | naive reward {f3(gate['bad_news_smd_naive'])}" if naive is not None else "")
-    lg.info("  length: partial rho(tau, loglen | m) %+.4f vs human %+.4f | content-free padding shift %s sd "
-            "(90%% CI; diagnostic only, never tuned)", gate["length_partial_rho_tau"],
-            gate["length_partial_rho_human"], f3(gate["padding_shift_sd"]))
-    if naive is not None:
-        lg.info("  naive reward (no partialling-out) | within-content partial rho %s | pooled partial rho %s | raw "
-                "rho %+.4f", f3(gate["naive_within_content_rho"]), f3(gate["naive_partial_rho"]), gate["naive_rho"])
-    if abs(gate["tau_m_rho"]) > 0.2 or (gate["bad_news_smd_tau"][1] * gate["bad_news_smd_tau"][2] > 0):
-        lg.warning("tau still carries context/content signal (rho(tau, m)=%+.3f, bad-news difference %s): m_hat "
-                   "under-fits. PACE's advantages are unaffected while the NLI feasibility check is accurate (content "
-                   "is constant inside a feasible group), but content changes that slip past it are then rewarded; "
-                   "improve m (more data/epochs, richer content descriptors) before relying on the naive-vs-PACE "
-                   "comparison", gate["tau_m_rho"], f3(gate["bad_news_smd_tau"]))
-    rep = {"gate": gate, "m_r2_oof": r2_m, "g_fit": {k: v for k, v in g_res.items() if k != "history"},
-           "label_source": cfg.label_source, "n_R": len(R)}
+    for name, d in diag.items():
+        lg.info("TEST %-11s%s | within-content partial rho(r, human | m_L) %s (%d turns in multi-member strata of "
+                "%d) | pooled %s | length partial %+.4f (human %+.4f) | bad-news smd %s (human %s) | rho(r, m0) %+.4f",
+                name, " [selected]" if name == selected else "", f3(d["within_content"]), d["n_in_multi_strata"],
+                len(T), f3(d["pooled_partial"]), d["length_partial"], human["length_partial"], f3(d["bad_news_smd"]),
+                f3(human["bad_news_smd"]), d["rho_m"])
+    lg.info("content-free padding shift of the selected reward %s sd (90%% CI; diagnostic only)", f3(pad))
+    if abs(diag[selected]["length_partial"] - human["length_partial"]) > 0.15:
+        lg.warning("the selected reward still tracks length (%+.3f vs human %+.3f) after correction; the explicit "
+                   "length budget in RL is then the only protection against length hacking",
+                   diag[selected]["length_partial"], human["length_partial"])
+    gate = {"passes": passes, "selected": selected, "alternative": alternative, "selection_score_valid": sel_score,
+            "test": diag, "human": human, "padding_shift_sd": pad}
+    rep = {"gate": gate, "selected": selected, "alternative": alternative, "m_r2_oof": {"content": r2_0,
+           "content_length": r2_L}, "label_source": cfg.label_source, "n_R": len(R)}
     dump_json(rep, cfg.out / "reward.json")
-    if not gate["passes"]:
-        msg = ("REWARD GATE FAIL: within the same content, the phrasing effect tau does not predict HUMAN-labelled "
-               "satisfaction beyond m_hat (lower CI <= 0). RL on it would optimise noise.")
+    if not passes:
+        msg = (f"REWARD GATE FAIL: within the same content, the selected reward ({selected}) does not predict "
+               "HUMAN-labelled satisfaction beyond context, content and length (lower CI <= 0).")
         lg.error(msg)
         if cfg.strict:
             raise RuntimeError(msg)
+    else:
+        lg.info("REWARD GATE PASS (%s): within-content partial rho %s", selected, f3(diag[selected]["within_content"]))
     return rep
 
 
@@ -1558,82 +1729,126 @@ def rl_contexts(turns: Sequence[Turn], split: str, limit: Optional[int], seed: i
 
 def score_batch(arm: str, turns: Sequence[Turn], texts: Sequence[str], samples: Optional[Sequence[Sample]],
                 engines: Dict[str, Any], pc: PACEConfig) -> Dict[str, np.ndarray]:
-    """Reward and constraint quantities for one batch of responses."""
+    """Reward heads and constraint quantities for one batch of responses."""
     src = [t.agent_text for t in turns]
+    conv = [f"{t.history}\n{t.user_text}" for t in turns]
     hyg = np.asarray([hygiene_ok(x, pc.min_words, pc.max_words, pc.require_terminal)[0] for x in texts], bool)
     if samples is not None and not pc.allow_truncated:
         hyg &= ~np.asarray([s.truncated for s in samples], bool)
-    fab = np.asarray([bool(fabricated_entities(s, x)) for s, x in zip(src, texts)], bool)
+    fab = np.asarray([bool(fabricated_entities(s, x, c)) for s, x, c in zip(src, texts, conv)], bool)
     fid = engines["nli"].fidelity(src, texts)
     v_f = np.where(hyg & ~fab, 1.0 - fid["f"], 1.0)
     v_len = length_overrun(src, texts, pc.len_slack)
     if arm == "sentiment_only":
-        r, r_sd = engines["sentiment"](list(texts)), np.zeros(len(texts))
-    elif arm == "pace_naive_reward":
-        r, r_sd = engines["reward_naive"](turns, texts)
+        heads = np.asarray(engines["sentiment"](list(texts)), float)[:, None]
+    elif arm == "pace_alt_reward":
+        heads = engines["reward_alt"].heads(turns, texts)
     else:
-        r, r_sd = engines["reward"](turns, texts)
-    return {"r_mean": r, "r_sd": r_sd, "hyg": hyg, "fab": fab, "f": fid["f"], "complete": fid["complete"],
-            "contra": fid["contra"], "v_f": v_f, "v_len": v_len}
+        heads = engines["reward"].heads(turns, texts)
+    return {"heads": heads, "r_mean": heads.mean(1), "hyg": hyg, "fab": fab, "f": fid["f"],
+            "complete": fid["complete"], "contra": fid["contra"], "v_f": v_f, "v_len": v_len}
+
+
+def _snapshot(params) -> List[Any]:
+    return [p.detach().clone() for p in params]
+
+
+def _restore(params, snap) -> None:
+    import torch
+    with torch.no_grad():
+        for p, s in zip(params, snap):
+            p.copy_(s)
 
 
 def train_pace(arm: str, policy: PolicyLM, engines: Dict[str, Any], turns: Sequence[Turn], pc: PACEConfig,
                logger: logging.Logger, out_dir: Path, seed: int) -> Dict[str, Any]:
+    """PACE loop with an explicit trust region.
+
+    Every step first measures the ON-POLICY per-token KL(pi || ref) on the freshly sampled batch (free: the old
+    and reference log-probs are needed anyway).  That number drives the KL controller.  If it exceeds
+    kl_abort x target, the adapter is rolled back to the last in-region snapshot, the learning rate is halved,
+    the optimiser state is reset and beta is doubled, instead of ending the run (v1.0 stopped at step 22)."""
     from torch.optim import AdamW
-    constrained = arm in ("pace", "pace_naive_reward")
+    constrained = arm in ("pace", "pace_alt_reward")
     rng = np.random.default_rng(seed)
-    opt = AdamW([p for p in policy.model.parameters() if p.requires_grad], lr=pc.lr, weight_decay=0.0)
-    dual_f = DualVariable(pc.eps_fid, pc.dual_lr, pc.lam_f0 if constrained else 0.0, pc.lam_max, not constrained)
-    dual_l = DualVariable(pc.eps_len, pc.dual_lr, pc.lam_len0 if constrained else 0.0, pc.lam_max, not constrained)
-    beta, r_scale = pc.kl_coef, float("nan")
-    hist: List[Dict[str, float]] = []
-    aborted = False
-    logger.info("%s | constrained=%s | B=%d contexts x G=%d | PPO epochs %d | KL target %.3g | f_min %.2f | "
-                "eps_fid %.2f | length budget x%.2f", arm, constrained, pc.n_contexts, pc.group_size, pc.ppo_epochs,
-                pc.kl_target, pc.f_min, pc.eps_fid, 1 + pc.len_slack)
+    params = [p for p in policy.model.parameters() if p.requires_grad]
+    lr = pc.lr
+    opt = AdamW(params, lr=lr, weight_decay=0.0)
+    duals = [DualVariable(pc.eps_fid, pc.dual_lr, pc.lam_f0 if constrained else 0.0, pc.lam_max, not constrained),
+             DualVariable(pc.eps_len, pc.dual_lr, pc.lam_len0 if constrained else 0.0, pc.lam_max, not constrained)]
+    klc = KLController(pc.kl_coef, pc.kl_target, pc.kl_k, pc.kl_coef_min, pc.kl_coef_max)
+    r_scale = float("nan")
+    v_scale = np.full(2, np.nan)
+    good = _snapshot(params)
+    hist: List[Dict[str, Any]] = []
+    rollbacks, aborted = 0, False
+    logger.info("%s | constrained=%s | B=%d contexts x G=%d | lr %.2g | PPO epochs %d (stop at step KL %.3g) | KL "
+                "target %.3g, abort/rollback at x%g | f_min %.2f | eps_fid %.2f | length budget x%.2f", arm,
+                constrained, pc.n_contexts, pc.group_size, lr, pc.ppo_epochs, pc.target_step_kl, pc.kl_target,
+                pc.kl_abort, pc.f_min, pc.eps_fid, 1 + pc.len_slack)
     for step in range(1, pc.steps + 1):
         chunk = [turns[i] for i in rng.choice(len(turns), size=min(pc.n_contexts, len(turns)), replace=False)]
         samples = policy.generate([policy.prompt(t) for t in chunk], pc.group_size, pc.temperature, pc.top_p,
                                   pc.max_new_tokens, seed * 100003 + step, pc.gen_batch)
+        old = policy.batched_logprobs(samples, ref=False, micro=pc.micro)
+        ref = policy.batched_logprobs(samples, ref=True, micro=pc.micro)
+        dlt = np.concatenate([r - o for r, o in zip(ref, old)]) if old else np.zeros(1)
+        kl_now = float(np.mean(np.exp(dlt) - dlt - 1.0))           # k3 estimate of KL(pi || ref), on-policy
+        if kl_now > pc.kl_abort * pc.kl_target:
+            rollbacks += 1
+            _restore(params, good)
+            lr *= 0.5
+            opt = AdamW(params, lr=lr, weight_decay=0.0)
+            klc.beta = min(pc.kl_coef_max, 2.0 * klc.beta)
+            logger.warning("%s | step %d: on-policy KL %.4f > %g x target -> rollback %d/%d to the last in-region "
+                           "adapter, lr -> %.2g, beta -> %.3f", arm, step, kl_now, pc.kl_abort, rollbacks,
+                           pc.max_rollbacks, lr, klc.beta)
+            if rollbacks > pc.max_rollbacks:
+                logger.error("%s | too many rollbacks; stopping with the last in-region adapter", arm)
+                aborted = True
+                break
+            continue
+        if kl_now <= 2.0 * pc.kl_target:
+            good = _snapshot(params)
         flat = [t for t in chunk for _ in range(pc.group_size)]
         texts = [s.text for s in samples]
         gid = np.repeat(np.arange(len(chunk)), pc.group_size)
         sc = score_batch(arm, flat, texts, samples, engines, pc)
-        r = sc["r_mean"] - pc.kappa * sc["r_sd"]
         feasible = (sc["hyg"] & ~sc["fab"] & (sc["f"] >= pc.f_min)) if constrained else sc["hyg"]
-        scale = pc.scale_floor if not math.isfinite(r_scale) else max(r_scale, pc.scale_floor)
-        A = pace_advantages(r, sc["r_sd"], gid, sc["hyg"], feasible, sc["v_f"], sc["v_len"], dual_f.lam,
-                            dual_l.lam, scale, pc.snr_kappa, pc.adv_clip, pc.bad_penalty)
+        vs = np.where(np.isfinite(v_scale), np.maximum(v_scale, pc.v_scale_floor), pc.v_scale_floor)
+        rs = pc.scale_floor if not math.isfinite(r_scale) else max(r_scale, pc.scale_floor)
+        A = pace_advantages(sc["heads"], gid, sc["hyg"], feasible, np.column_stack([sc["v_f"], sc["v_len"]]),
+                            [d.lam for d in duals], vs, rs, pc.min_reliability, pc.adv_clip, pc.bad_penalty)
         if math.isfinite(A["within_sd"]):
             r_scale = A["within_sd"] if not math.isfinite(r_scale) else 0.9 * r_scale + 0.1 * A["within_sd"]
-        old = policy.batched_logprobs(samples, ref=False, micro=pc.micro)
-        ref = policy.batched_logprobs(samples, ref=True, micro=pc.micro)
-        st = policy.ppo_update(samples, A["adv"], old, ref, opt, pc, beta, rng)
-        lam_f = dual_f.update(float(np.mean(sc["v_f"])))
-        lam_l = dual_l.update(float(np.mean(sc["v_len"])))
-        beta = float(np.clip(beta * (1.5 if st["kl"] > 2 * pc.kl_target else 0.75 if st["kl"] < 0.5 * pc.kl_target
-                                     else 1.0), pc.kl_coef_min, pc.kl_coef_max))
+        ok = np.isfinite(A["v_sd"])
+        v_scale[ok] = np.where(np.isfinite(v_scale[ok]), 0.9 * v_scale[ok] + 0.1 * A["v_sd"][ok], A["v_sd"][ok])
+        st = policy.ppo_update(samples, A["adv"], old, ref, opt, pc, klc.beta, rng)
+        beta = klc.update(kl_now)
+        lam_f = duals[0].update(float(np.mean(sc["v_f"])))
+        lam_l = duals[1].update(float(np.mean(sc["v_len"])))
         rec = {"step": step, "reward": float(np.mean(sc["r_mean"][sc["hyg"]])) if sc["hyg"].any() else float("nan"),
                "feasible": float(np.mean(feasible)), "fidelity": float(np.mean(sc["f"])),
                "fabricated": float(np.mean(sc["fab"])), "hygiene": float(np.mean(sc["hyg"])),
                "len_ratio": float(np.mean([(n_words(x) + 1) / (n_words(t.agent_text) + 1) for x, t in zip(texts, flat)])),
                "v_f": float(np.mean(sc["v_f"])), "v_len": float(np.mean(sc["v_len"])), "lam_f": lam_f,
-               "lam_len": lam_l, "kl": st["kl"], "beta": beta, "clipfrac": st["clipfrac"],
-               "affect_groups": A["n_affect_groups"], "gated": A["n_gated"], "r_scale": r_scale}
+               "lam_len": lam_l, "kl_onpolicy": kl_now, "beta": beta, "clipfrac": st["clipfrac"],
+               "updates": st["updates"], "step_kl": st["approx_kl"], "reliability": A["reliability"],
+               "affect_groups": A["n_affect_groups"], "gated": A["n_gated"], "r_scale": r_scale, "lr": lr,
+               "rollbacks": rollbacks}
         hist.append(rec)
         if step % pc.log_every == 0 or step == 1 or step == pc.steps:
             logger.info("%s | step %d/%d | reward %.4f | feasible %.2f fidelity %.3f fabricated %.3f hygiene %.2f | "
-                        "len x%.2f | lam_f %.2f lam_len %.2f | KL %.4f (beta %.4f) clip %.3f | affect groups %d/%d "
-                        "(gated %d)", arm, step, pc.steps, rec["reward"], rec["feasible"], rec["fidelity"],
-                        rec["fabricated"], rec["hygiene"], rec["len_ratio"], lam_f, lam_l, st["kl"], beta,
-                        st["clipfrac"], A["n_affect_groups"], A["n_groups"], A["n_gated"])
-        if math.isfinite(st["kl"]) and st["kl"] > pc.kl_abort * pc.kl_target:
-            logger.error("%s | step %d: per-token KL %.4f exceeds %g x target; stopping and keeping this adapter",
-                         arm, step, st["kl"], pc.kl_abort)
-            aborted = True
-            break
+                        "len x%.2f | lam_f %.2f lam_len %.2f | KL %.4f (beta %.3f) | updates %d step-KL %.4f clip %.3f "
+                        "| affect groups %d/%d (gated %d, reliability %.2f)", arm, step, pc.steps, rec["reward"],
+                        rec["feasible"], rec["fidelity"], rec["fabricated"], rec["hygiene"], rec["len_ratio"], lam_f,
+                        lam_l, kl_now, beta, st["updates"], st["approx_kl"], st["clipfrac"], A["n_affect_groups"],
+                        A["n_groups"], A["n_gated"], A["reliability"] if math.isfinite(A["reliability"]) else -1.0)
+    if aborted:
+        _restore(params, good)
     policy.save_adapter(out_dir / f"policy_{arm}_s{seed}")
-    return {"arm": arm, "seed": seed, "history": hist, "aborted": aborted, "steps_run": len(hist)}
+    return {"arm": arm, "seed": seed, "history": hist, "aborted": aborted, "rollbacks": rollbacks,
+            "steps_run": len(hist)}
 
 
 def load_engines(cfg: Config, ex: Experiment, need: Sequence[str]) -> Dict[str, Any]:
@@ -1642,10 +1857,12 @@ def load_engines(cfg: Config, ex: Experiment, need: Sequence[str]) -> Dict[str, 
         eng["nli"] = ex.nli
     if "sentiment" in need:
         eng["sentiment"] = ex.sentiment
-    if "reward" in need:
-        eng["reward"] = AffectReward(cfg.out / "reward_g.pt", cfg, cfg.device)
-    if "reward_naive" in need and (cfg.out / "reward_naive.pt").exists():
-        eng["reward_naive"] = AffectReward(cfg.out / "reward_naive.pt", cfg, cfg.device)
+    if "reward" in need or "reward_alt" in need:
+        rep = load_json(cfg.out / "reward.json")
+        if "reward" in need:
+            eng["reward"] = AffectReward(cfg.out / f"{rep['selected']}.pt", cfg, cfg.device)
+        if "reward_alt" in need:
+            eng["reward_alt"] = AffectReward(cfg.out / f"{rep['alternative']}.pt", cfg, cfg.device)
     if "judge" in need:
         eng["judge"] = Judge(cfg.out / "judge.pt", cfg, cfg.device)
     return eng
@@ -1659,10 +1876,10 @@ def stage_train(cfg: Config, arm: str, seed: int) -> Dict[str, Any]:
                            "(use --no-strict only for debugging)")
     seed_everything(seed)
     policy = PolicyLM(cfg, ex.logger, cfg.device)
-    need = ["nli", "sentiment", "reward"] + (["reward_naive"] if arm == "pace_naive_reward" else [])
+    need = ["nli", "sentiment"] + (["reward_alt"] if arm == "pace_alt_reward" else ["reward"])
     eng = load_engines(cfg, ex, need)
-    if arm == "pace_naive_reward" and "reward_naive" not in eng:
-        raise FileNotFoundError("reward_naive.pt missing; re-run the reward stage with the naive ablation enabled")
+    ex.logger.info("%s | reward model: %s", arm, rep["alternative"] if arm == "pace_alt_reward" else
+                   ("sentiment of the agent turn" if arm == "sentiment_only" else rep["selected"]))
     turns = rl_contexts(ex.turns, "train", cfg.rl_contexts, seed)
     res = train_pace(arm, policy, eng, turns, cfg.pace, ex.logger, cfg.out, seed)
     dump_json(res, cfg.out / f"train_{arm}_{seed}.json")
@@ -1692,7 +1909,7 @@ def stage_eval(cfg: Config, arm: str, seed: int) -> Dict[str, Any]:
     rows = []
     for i, (t, x) in enumerate(zip(te, texts)):
         rows.append({"uid": t.uid, "dialogue_id": t.dialogue_id, "arm": arm, "seed": seed, "response": x,
-                     "source": t.agent_text, "judge_utility": float(j[i]), "affect_tau": float(sc["r_mean"][i]),
+                     "source": t.agent_text, "judge_utility": float(j[i]), "affect_reward": float(sc["r_mean"][i]),
                      "fidelity": float(sc["f"][i]), "complete": float(sc["complete"][i]),
                      "contradiction": float(sc["contra"][i]), "fabricated": float(sc["fab"][i]),
                      "feasible": float(sc["hyg"][i] and not sc["fab"][i] and sc["f"][i] >= cfg.pace.f_min),
@@ -1700,13 +1917,13 @@ def stage_eval(cfg: Config, arm: str, seed: int) -> Dict[str, Any]:
                      "len_ratio": (n_words(x) + 1) / (n_words(t.agent_text) + 1), "agent_sentiment": float(sent[i]),
                      "bad_news": float(is_bad_news(t))})
     dump_json(rows, cfg.out / f"eval_{arm}_{seed}.json")
-    ex.logger.info("eval %s seed=%d | n=%d | judge %.4f | tau %.4f | fidelity %.3f | feasible %.3f | fabricated %.3f "
-                   "| words %.1f", arm, seed, len(rows), *[float(np.mean([r[k] for r in rows])) for k in
-                   ("judge_utility", "affect_tau", "fidelity", "feasible", "fabricated", "words")])
+    ex.logger.info("eval %s seed=%d | n=%d | judge %.4f | reward %.4f | fidelity %.3f | feasible %.3f | fabricated "
+                   "%.3f | words %.1f", arm, seed, len(rows), *[float(np.mean([r[k] for r in rows])) for k in
+                   ("judge_utility", "affect_reward", "fidelity", "feasible", "fabricated", "words")])
     return {"n": len(rows)}
 
 
-REPORT_METRICS = ("judge_utility", "affect_tau", "fidelity", "feasible", "fabricated", "contradiction", "hygiene",
+REPORT_METRICS = ("judge_utility", "affect_reward", "fidelity", "feasible", "fabricated", "contradiction", "hygiene",
                   "len_ratio", "agent_sentiment")
 
 
@@ -1751,9 +1968,9 @@ def stage_report(cfg: Config, arms: Sequence[str]) -> Dict[str, Any]:
     for nm, p in zip(names, holm(pv)):
         summary["contrasts"][nm]["judge_utility"]["p_holm"] = p
     dump_json(summary, cfg.out / "report.json")
-    lg.info("%-20s %8s %8s %8s %8s %8s %8s", "arm", "judge", "tau", "fidel", "feasible", "fabric", "len_x")
+    lg.info("%-20s %8s %8s %8s %8s %8s %8s", "arm", "judge", "reward", "fidel", "feasible", "fabric", "len_x")
     for arm, v in summary["arms"].items():
-        lg.info("%-20s %8.4f %8.4f %8.3f %8.3f %8.3f %8.2f", arm, v["judge_utility"], v["affect_tau"], v["fidelity"],
+        lg.info("%-20s %8.4f %8.4f %8.3f %8.3f %8.3f %8.2f", arm, v["judge_utility"], v["affect_reward"], v["fidelity"],
                 v["feasible"], v["fabricated"], v["len_ratio"])
     for nm, c in summary["contrasts"].items():
         j, f = c["judge_utility"], c["fidelity"]
@@ -1837,15 +2054,34 @@ def run_unit_tests() -> None:
     r = np.array([0.1, 0.3, 0.2, 9.0, 0.5, 0.5, 0.5, 0.5])
     hyg = np.array([1, 1, 1, 1, 1, 1, 1, 0], bool)
     feas = np.array([1, 1, 1, 0, 1, 1, 1, 1], bool)
-    vf = np.array([0.1, 0.1, 0.1, 0.9, 0.0, 0.0, 0.0, 1.0])
-    A = pace_advantages(r, np.zeros(8), gid, hyg, feas, vf, np.zeros(8), 2.0, 0.0, 0.1, snr_kappa=1.0)
+    V = np.column_stack([[0.1, 0.1, 0.1, 0.9, 0.0, 0.0, 0.0, 1.0], np.zeros(8)])
+    A = pace_advantages(r, gid, hyg, feas, V, [2.0, 0.0], [0.1, 0.1], 0.1)
     assert A["a_aff"][3] == 0.0, "an infeasible response received affect advantage"
     assert abs(A["a_aff"][:3].sum()) < 1e-9 and A["a_aff"][1] > 0 > A["a_aff"][0]
     assert A["a_con"][3] < 0, "a constraint violation was not penalised"
     assert A["adv"][7] == -1.0 and A["n_affect_groups"] == 1, "hygiene failure / zero-spread group mishandled"
-    Ag = pace_advantages(r, np.full(8, 1.0), gid, hyg, feas, vf, np.zeros(8), 0.0, 0.0, 0.1, snr_kappa=1.0)
-    assert Ag["n_gated"] == 2 and not np.any(Ag["a_aff"][:3]), "signal-to-noise gate did not fire"
-    print("unit 3 OK | feasible-set leave-one-out advantages, constraint terms, hygiene and SNR gating")
+    # scale-free constraint term: multiplying all violations by 10 (and their scale) changes nothing
+    A10 = pace_advantages(r, gid, hyg, feas, 10 * V, [2.0, 0.0], [1.0, 1.0], 0.1)
+    assert np.allclose(A["a_con"], A10["a_con"])
+    # reliability: heads that agree give w ~ 1; heads that disagree as much as the spread give w ~ 0
+    rs = np.random.default_rng(3)
+    sig = np.linspace(-1, 1, 8)
+    agree = sig[:, None] + rs.normal(0, 0.01, (8, 5))
+    noisy = sig[:, None] * 0.05 + rs.normal(0, 1.0, (8, 5))
+    one = np.zeros(8, int)
+    Ag = pace_advantages(agree, one, np.ones(8, bool), np.ones(8, bool), np.zeros((8, 2)), [0, 0], [1, 1], 1.0)
+    An = pace_advantages(noisy, one, np.ones(8, bool), np.ones(8, bool), np.zeros((8, 2)), [0, 0], [1, 1], 1.0)
+    assert Ag["reliability"] > 0.95 and An["reliability"] < 0.3, (Ag["reliability"], An["reliability"])
+    assert np.abs(An["a_aff"]).max() < 0.5 * np.abs(Ag["a_aff"]).max()
+    kc = KLController(0.1, 0.05)
+    for _ in range(10):
+        kc.update(0.0)
+    assert kc.beta > 0.1 * 0.8 ** 10, "KL controller collapses beta when KL is small"
+    b0 = kc.beta
+    kc.update(1.0)
+    assert kc.beta >= 1.19 * b0, "KL controller does not react to a KL spike"
+    print(f"unit 3 OK | feasible-set LOO advantages, scale-free constraints, reliability {Ag['reliability']:.2f} "
+          f"(agreeing heads) vs {An['reliability']:.2f} (noisy heads), KL controller")
 
     # (4) Constrained bandit in a bad-news context.  Arms: (keep, plain) (keep, empathetic) (drop, plain)
     #     (drop, empathetic).  Using the phrasing-effect values implied by unit 2's model, PACE must converge to
@@ -1856,22 +2092,26 @@ def run_unit_tests() -> None:
     fid = np.array([0.95, 0.95, 0.05, 0.05])
 
     def run(reward_vec, constrained, steps=500, G=8, lr=0.5, seed=1):
-        rs = np.random.default_rng(seed)
+        rs_ = np.random.default_rng(seed)
         theta = np.zeros(4)
-        lam = DualVariable(0.10, 1.0, 1.0 if constrained else 0.0, 20.0, not constrained)
+        lam = DualVariable(0.10, 0.2, 1.0 if constrained else 0.0, 5.0, not constrained)
         scale = float("nan")
+        vscale = float("nan")
         for _ in range(steps):
             pi = np.exp(theta - theta.max())
             pi /= pi.sum()
-            a = rs.choice(4, size=G, p=pi)
-            rr = reward_vec[a] + rs.normal(0, 0.05, G)
-            f = np.clip(fid[a] + rs.normal(0, 0.02, G), 0, 1)
+            a = rs_.choice(4, size=G, p=pi)
+            heads = reward_vec[a][:, None] + rs_.normal(0, 0.05, (G, 1)) + rs_.normal(0, 0.01, (G, 4))
+            f = np.clip(fid[a] + rs_.normal(0, 0.02, G), 0, 1)
             feas_ = (f >= 0.5) if constrained else np.ones(G, bool)
             sc_ = 0.05 if not math.isfinite(scale) else max(scale, 1e-3)
-            out = pace_advantages(rr, np.full(G, 0.02), np.zeros(G, int), np.ones(G, bool), feas_, 1 - f,
-                                  np.zeros(G), lam.lam, 0.0, sc_, snr_kappa=1.0)
+            vs_ = 0.05 if not math.isfinite(vscale) else max(vscale, 0.05)
+            out = pace_advantages(heads, np.zeros(G, int), np.ones(G, bool), feas_,
+                                  np.column_stack([1 - f, np.zeros(G)]), [lam.lam, 0.0], [vs_, 1.0], sc_)
             if math.isfinite(out["within_sd"]):
                 scale = out["within_sd"] if not math.isfinite(scale) else 0.9 * scale + 0.1 * out["within_sd"]
+            if math.isfinite(out["v_sd"][0]):
+                vscale = out["v_sd"][0] if not math.isfinite(vscale) else 0.9 * vscale + 0.1 * out["v_sd"][0]
             grad = np.zeros(4)
             for ai, adv in zip(a, out["adv"]):
                 grad += adv * (np.eye(4)[ai] - pi)
@@ -1880,23 +2120,30 @@ def run_unit_tests() -> None:
         pi = np.exp(theta - theta.max())
         return pi / pi.sum()
 
-    pi_pace = run(tau, True)
-    pi_tau_unc = run(tau, False)
-    pi_naive = run(mu, False)
-    assert pi_pace[1] > 0.9, f"PACE did not converge to keep+empathetic: {np.round(pi_pace, 3)}"
-    assert pi_tau_unc[2] + pi_tau_unc[3] > 0.5, f"unconstrained tau should drift to dropping content: {pi_tau_unc}"
-    assert pi_naive[2] + pi_naive[3] > 0.9, f"naive affect reward should learn to drop bad news: {pi_naive}"
-    print(f"unit 4 OK | P(keep, empathetic): PACE {pi_pace[1]:.3f} | P(drop bad news): unconstrained tau "
-          f"{pi_tau_unc[2] + pi_tau_unc[3]:.3f}, naive sentiment-style reward {pi_naive[2] + pi_naive[3]:.3f}")
+    res = np.array([(run(tau, True, seed=s)[1], run(tau, False, seed=s)[2:].sum(), run(mu, False, seed=s)[2:].sum(),
+                     run(mu, True, seed=s)[1]) for s in range(1, 6)])
+    lo = res.min(0)
+    assert lo[0] > 0.9, f"PACE did not converge to keep+empathetic: {res[:, 0]}"
+    assert lo[1] > 0.5, f"unconstrained tau should drift to dropping content: {res[:, 1]}"
+    assert lo[2] > 0.9, f"naive affect reward should learn to drop bad news: {res[:, 2]}"
+    assert lo[3] > 0.9, f"the constraint should also protect the direct reward: {res[:, 3]}"
+    print(f"unit 4 OK (min over 5 seeds) | P(keep, empathetic): PACE {lo[0]:.3f}, direct reward + PACE constraints "
+          f"{lo[3]:.3f} | P(drop bad news): unconstrained tau {lo[1]:.3f}, naive affect reward {lo[2]:.3f}")
 
     # (5) content descriptor / fabrication checks
     assert delex_acts({"general-reqmore": [["none", "none"]]}) == "social_only"
     assert delex_acts({"Booking-NoBook": [["Day", "monday"]], "general-bye": []}) == "Booking-NoBook(day)"
     assert fabricated_entities("Your reference is AB12CD34, train at 10:15.", "Booked, ref AB12CD34 at 10:15!") == set()
     assert "99" in fabricated_entities("It costs 10 pounds.", "It costs 99 pounds.")
+    assert fabricated_entities("I have booked it.", "Your table for 4 at 18:30 is booked.",
+                               "Customer: a table for four people at 18:30 please") == set(), \
+        "details restated from the conversation must not count as fabrication"
+    assert fabricated_entities("Two rooms are free.", "There are 2 rooms free, one moment.") == set()
+    assert fabricated_entities("The train leaves at 10:30am.", "It leaves at 10:30, I am afraid.") == set()
     assert "request" not in info_units("Is there anything else I can help you with?")
-    print("unit 5 OK | content descriptors and fabrication detector")
-
+    lb = LengthBasis.fit(np.log1p(np.arange(1, 60)))
+    assert np.allclose(lb([100.0]), lb([lb.hi])), "length basis must be clamped"
+    print("unit 5 OK | content descriptors, context-grounded fabrication detector, clamped length basis")
 
 # ----------------------------------------------------------------------------------------------------------
 # self-test: the whole pipeline on synthetic EmoWOZ with tiny randomly initialised local models
@@ -1996,7 +2243,7 @@ def _check_policy_gradient_path(cfg: Config) -> None:
     assert all(np.allclose(o, r, atol=1e-5) for o, r in zip(old, ref)), "fresh adapter differs from the reference"
     adv = np.array([1.0, -1.0] * 4)
     opt = AdamW([p for p in pol.model.parameters() if p.requires_grad], lr=5e-2)
-    pc = PACEConfig(ppo_epochs=2, minibatch=8, micro=4, max_new_tokens=8)
+    pc = PACEConfig(ppo_epochs=2, minibatch=8, micro=4, max_new_tokens=8, target_step_kl=10.0)
     pol.ppo_update(samples, adv, old, ref, opt, pc, 0.01, np.random.default_rng(0))
     new = pol.batched_logprobs(samples, ref=False, micro=4)
     gain = sum(a * float(n.sum() - o.sum()) for a, n, o in zip(adv, new, old))
@@ -2027,7 +2274,7 @@ def run_selftest(out: Path = Path("pace_selftest")) -> None:
     cfg = build_config(parse_args([
         "all", "--no-strict", "--device", "cpu", "--data-dir", str(data), "--out", str(out / "run"),
         "--encoder-model", paths["encoder"], "--sentiment-model", paths["sentiment"], "--nli-model", paths["nli"],
-        "--policy-model", paths["lm"], "--seeds", "42", "--arms", "pace", "pace_naive_reward",
+        "--policy-model", paths["lm"], "--seeds", "42", "--arms", "pace", "pace_alt_reward",
         "--rl-steps", "3", "--rl-contexts-per-step", "2", "--rl-group", "4", "--rl-max-new-tokens", "12",
         "--eval-turns", "16", "--epochs", "1", "--batch", "16", "--n-heads", "3", "--n-boot", "100",
     ]))
@@ -2036,11 +2283,12 @@ def run_selftest(out: Path = Path("pace_selftest")) -> None:
     stage_all(cfg)
     _check_policy_gradient_path(cfg)
     rep = load_json(cfg.out / "report.json")
-    for arm in ("source", "base", "pace", "pace_naive_reward"):
+    for arm in ("source", "base", "pace", "pace_alt_reward"):
         assert arm in rep["arms"], f"arm {arm} missing from the report"
     assert (cfg.out / "policy_pace_s42" / "adapter_config.json").exists()
     rw = load_json(cfg.out / "reward.json")
-    assert "tau_partial_rho" in rw["gate"] and "bad_news_smd_naive" in rw["gate"]
+    assert rw["selected"] in ("reward_g", "reward_full") and set(rw["gate"]["test"]) == {"reward_g", "reward_full"}
+    assert (cfg.out / f"{rw['selected']}.lencorr.json").exists()
     print(f"\nSELFTEST OK | pipeline ran end to end on tiny local models | arms {sorted(rep['arms'])}")
 
 
@@ -2071,7 +2319,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--label-source", choices=["detector", "human"], default="detector")
     p.add_argument("--n-heads", type=int, default=5)
     p.add_argument("--crossfit-folds", type=int, default=2)
-    p.add_argument("--no-naive-reward", dest="fit_naive_reward", action="store_false")
+    p.add_argument("--effect-epochs", type=int, default=3, help="epochs for the two reward candidates")
     p.add_argument("--epochs", type=int, default=2)
     p.add_argument("--batch", type=int, default=32)
     p.add_argument("--enc-lr", type=float, default=2e-5)
@@ -2080,11 +2328,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--rl-steps", type=int, default=300)
     p.add_argument("--rl-contexts-per-step", type=int, default=8)
     p.add_argument("--rl-group", type=int, default=8)
-    p.add_argument("--rl-lr", type=float, default=1e-5)
+    p.add_argument("--rl-lr", type=float, default=5e-6)
     p.add_argument("--rl-max-new-tokens", type=int, default=160)
     p.add_argument("--ppo-epochs", type=int, default=2)
     p.add_argument("--kl-target", type=float, default=0.05)
-    p.add_argument("--kappa", type=float, default=1.0, help="pessimism: reward = mean - kappa * ensemble sd")
+    p.add_argument("--kl-coef", type=float, default=0.1, help="initial beta of the KL penalty")
+    p.add_argument("--kl-abort", type=float, default=6.0, help="roll back when on-policy KL > this x target")
+    p.add_argument("--target-step-kl", type=float, default=0.02, help="per-token KL that ends the PPO epochs")
+    p.add_argument("--dual-lr", type=float, default=0.1)
     p.add_argument("--f-min", type=float, default=0.5)
     p.add_argument("--eps-fid", type=float, default=0.15)
     p.add_argument("--len-slack", type=float, default=0.6)
@@ -2105,15 +2356,14 @@ def build_config(a: argparse.Namespace) -> Config:
                  encoder_model=a.encoder_model, sentiment_model=a.sentiment_model, nli_model=a.nli_model,
                  policy_model=a.policy_model, load_4bit=bool(a.load_4bit), lora_r=a.lora_r,
                  label_source=a.label_source, n_heads=a.n_heads, crossfit_folds=a.crossfit_folds,
-                 fit_naive_reward=bool(a.fit_naive_reward), n_boot=a.n_boot, eval_turns=a.eval_turns,
+                 effect_epochs=a.effect_epochs, n_boot=a.n_boot, eval_turns=a.eval_turns,
                  arms=tuple(a.arms))
     cfg.fit.epochs, cfg.fit.batch, cfg.fit.lr, cfg.fit.max_train = a.epochs, a.batch, a.enc_lr, a.max_train
     pc = cfg.pace
     pc.steps, pc.n_contexts, pc.group_size, pc.lr = a.rl_steps, a.rl_contexts_per_step, a.rl_group, a.rl_lr
-    pc.max_new_tokens, pc.ppo_epochs, pc.kl_target, pc.kappa = a.rl_max_new_tokens, a.ppo_epochs, a.kl_target, a.kappa
+    pc.max_new_tokens, pc.ppo_epochs, pc.kl_target = a.rl_max_new_tokens, a.ppo_epochs, a.kl_target
+    pc.kl_coef, pc.kl_abort, pc.target_step_kl, pc.dual_lr = a.kl_coef, a.kl_abort, a.target_step_kl, a.dual_lr
     pc.f_min, pc.eps_fid, pc.len_slack = a.f_min, a.eps_fid, a.len_slack
-    if "pace_naive_reward" in cfg.arms and not cfg.fit_naive_reward:
-        cfg.arms = tuple(x for x in cfg.arms if x != "pace_naive_reward")
     return cfg
 
 
