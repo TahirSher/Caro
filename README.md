@@ -1,130 +1,75 @@
-# PACE: content-equivalent affect alignment from implicit customer emotion
+# CASPI: Certified Affect-Safe Preference Iteration
 
-`pace.py` is a single end-to-end script that replaces CARO v12. It trains a customer-service LLM to
-deliver **the same information** in a way that leaves the customer in a better emotional state. It
-learns from the customer's next utterance, scored by an emotion detector and a sentiment model, and
-needs no explicit ratings.
+`caspi.py` is one self-contained script. It aligns a customer-service LLM with customer satisfaction
+from **implicit** feedback, meaning the simulated customer's next-turn emotion, with no ratings. The
+model keeps the task information, and the script **certifies** that the returned policy is no worse
+than SFT. It replaces the PACE pipeline (`pace-1`, ~7,900 lines) that the research brief analysed.
+The old CARO machinery is gone: the panel estimator, logit projector, length calibrations, learned
+reward model and GRPO.
 
 ```
-python pace.py unittest                    # numpy statistical tests (seconds)
-python pace.py selftest                    # whole pipeline on tiny local random models, CPU (~10 s)
-python pace.py all --download --models-dir /home/tahir/RL-LLM/models --out pace_run --no-4bit
+python caspi.py unittest     # statistics, estimator and guarantee checks (numpy, seconds)
+python caspi.py selftest     # every stage on tiny random local models (CPU, ~2 min)
+python caspi.py all --download --models-dir /home/tahir/RL-LLM/models --out caspi_run --no-load-4bit
 ```
 
-Models it needs: `Qwen/Qwen2.5-3B-Instruct` (policy),
-`cardiffnlp/twitter-roberta-base-sentiment-latest` (encoder backbone and sentiment), and
-`cross-encoder/nli-deberta-v3-base` (fidelity). You have the first two already. The third must be
-added to your cache.
+Existing `sft_policy/` and `simulator/` adapters stay valid because the prompt formats are
+unchanged. Copy them into `--out` and run stages individually:
+`validate → preregister → train → eval → eval-external → cross-eval → report → length →
+human-export → claims`.
 
----
+**Rename.** "PACE" collides with an iterative-DPO preprint (arXiv 2602.05370) and other 2026 work.
+"CiPO" is also taken (ACL 2026). In one search I found no LLM-alignment method called CASPI, but
+check again before you submit.
 
+## How every gap in the brief is addressed
 
-## 0. v1.1: fixes driven by the first real run (detector / reward / judge / train logs)
+| Brief item | What `caspi.py` does |
+|---|---|
+| 6.3 / 7.1-1 Acceptance test under-powered (α/K per round, n≤300, margins 0.1·sd) | **Seldonian split.** The per-round guard runs on a *selection* split and is explicitly a heuristic. **One** certification test at full α runs on a disjoint *safety* split with one context per dialogue, so units are i.i.d. The test is intersection-union, so it needs no multiplicity correction across objectives or rounds. Every check logs its power at zero difference and the number of dialogues needed for 80 % power. |
+| 7.1-2 Dev-pool estimator bias | Every guard and certification builds a **fresh** pool in which the SFT reply *and* the new reply are both proposals. There is an ESS floor. Pools are never reused across runs. |
+| 7.1-3 Training-pool proposal asymmetry | **Every** candidate is a proposal of its context's pool. Pairs whose estimates rest on fewer than `min_pair_ess` effective replies are dropped. |
+| 7.1-4 Silent component loss | Only the shared-pool estimator exists, so nothing can silently fall back. |
+| 7.1-5 Length not in acceptance | TOST equivalence on the log word ratio (±0.15) is part of the guard and the certification. |
+| 7.1-6 Likelihood displacement | Chosen and rejected log-likelihood changes are logged every round. If the chosen likelihood falls, the NLL anchor doubles. Near-duplicate pairs (Jaccard ≥ 0.9) are dropped. |
+| 7.1-7 σ estimated once | σ is re-estimated **every round** on an independent replicate pool. |
+| 7.1-8 Vacuous information constraint | The constraint pair now also requires that information is not lost. The vacuous share is logged per round, and the content share per test. |
+| 7.1-9 Hygiene check used the mean only | Hygiene now gets a one-sided confidence bound like every other objective. |
+| 7.1-10 Data-dependent margins | Margins are numeric and pre-registered (`preregistration.json`, written before training). Changing them raises an error. |
+| 7 Over-claims in the docstrings | The docstring states a Proposition and proof sketch with exact conditions, plus what is **not** claimed: the judge's SNIS bias, judge ≠ humans, and that the guard carries no guarantee. It drops "off-policy corrected" and the DPO≡RL claim, and cites Seldonian/HC-RLHF. |
+| G1/G3 Monitor shares the simulator | The monitor customer is now the **base** model with the adapter disabled, read by an independent labeller. This is partial independence: same base weights. |
+| G4 Information measure is lexical | Rewrites must pass an **NLI** completeness/contradiction filter. The acceptance test still uses the lexical score, and this is stated. |
+| G6 Rewrites unchecked | Covered by the same NLI filter. Rewrites come from the base model (off-policy), which the docs state. |
+| G7 Evaluation circularity | **Symmetric evaluation pools**, where all arms are proposals of one pool per context. Also an out-of-family external judge, cross-evaluator agreement, a blinded human study, and `claims.md`. |
+| RQ4 Baselines | `online_dpo`, `sentiment_only` (same optimiser, agent-wording sentiment), `offline_dpo` (same data budget), `sft_bon` (selected on an independent pool). |
 
-| Log evidence | Root cause | Fix in v1.1 |
-|---|---|---|
-| `step 22: per-token KL 1.1633 exceeds 20 x target`, and beta 0.0375 → 0.0067 by step 10 | beta was multiplied by 0.75 on every quiet step. Constraint advantages used raw violations with λ_f 1.6 → 6.3, so they saturated the ±5 clip. There was no trust region. | Proportional KL controller (Ziegler et al., 2019) on the **on-policy** KL. Constraint terms scaled by the running violation sd. EMA-damped duals with λ ≤ 5. PPO epochs stop when per-token step KL > 0.02. **Rollback** to the last in-region adapter (lr halved, Adam reset, beta doubled) instead of aborting. lr 5e-6. |
-| `fabricated 0.750`, `feasible 0.23` | Numbers the *customer* gave (party size, times) were checked against the draft only | Fabrication is checked against draft + conversation, with number-word and "10:30am" normalisation |
-| `len x2.54` | The instruct model is verbose and the prompt gave no length budget | The prompt states the budget. The length constraint stays. |
-| `partial rho(tau, loglen \| m) -0.3771 vs human -0.0427`; padding shift −0.076 sd | The reward learnt a brevity shortcut the humans do not show | Frozen, clamped piecewise-linear length correction (net of context and content). The nuisance and the gate now control for length. |
-| naive within-content ρ **+0.140** vs τ **+0.104** | Residualising removed signal. The direct model estimates the same within-group quantity with less error. | Both candidates are trained. A **pre-registered selection** on the *validation* split chooses the one for RL, the other becomes the `pace_alt_reward` ablation, and only the selected one is gated on test. |
-| `affect groups 0/8 (gated 6)` | The spread was compared with the per-head sd rather than the sd of the head mean (√H too strict), with all-or-nothing gating | ICC-type reliability weight w_g = s²/(s²+SE²) scales each group's affect advantage |
+## Bugs in the predecessor that this script fixes
 
-Plainly: the v1.0 claim that the residualised phrasing effect is the better reward is **not supported by
-your data**. The protection against dropping bad news comes from the feasible-set constraint (unit test 4:
-the direct reward with PACE's constraints reaches 0.997 on "keep + empathetic"). The pipeline now lets the
-data choose the reward estimator and reports both.
+1. **Inexact importance sampling.** The pool replies were sampled with the model's default
+   generation config. Qwen2.5-Instruct ships `top_k=20` (`top_p=0.8`), and only `top_p` and the
+   repetition penalty were overridden. The pool replies were also post-processed (`trim_to_sentence`)
+   and re-tokenised before scoring. Both make the sampling density differ from the density in the
+   weights.
+   - **Fix:** CASPI samples with `top_k=0` and scores the **sampled token ids**.
+   - **Verified here:** on the tiny model, 1,179 draws fell outside the top 20 tokens against an
+     expected 1,148.
+   - **Check your snapshot's** `generation_config.json`.
+2. **Biased evaluation pools.** Eval pools were built from gold + the *first* arm's replies. Every
+   later arm was scored by extrapolation. CASPI makes all arms proposals of one pool.
+3. **Stale pool reuse.** Pools persisted across runs and were reused even when the proposals had
+   changed. CASPI rebuilds them every run.
 
-## 1. Critique of CARO v12, based on your own logs
+## What was verified, and what was not
 
-| # | Finding | Evidence |
-|---|---|---|
-| 1 | **The signal RL actually uses was never validated against humans.** GRPO only sees within-context differences. About 74% of label variance is between contexts and cancels inside a group. The human anchor (ρ=0.547) is a between-context number. The only within-context human check is the gold-response margin, and it is essentially zero. | corpus: `within var=0.0037 between=0.0105`; reward: `gold-anchor rho=+0.0614` (v11 and v12 5-member), `+0.1423` (v12 10-member). The gate prints a warning and still passes. |
-| 2 | **Humans do not license the simulator's brevity preference.** v12 calibrates the reward's length slope *to the labels'*, arguing that the labels' length association is content signal. Your own log refutes that: human labels do not track length at all. | validate: `observational within-context length rho -0.177 … human label vs length rho +0.002`; corpus labels `rho -0.278`. |
-| 3 | **The outcome estimator is surface-brittle, not length-biased.** O(x) is a softmax over PMI(reply_j; x) for 48 replies taken from *other* dialogues, so it mostly measures topical overlap. Moving the same filler to a different position disturbs it as much as adding filler does. Versions v8 to v12 patched "length" while the root cause was generic brittleness. | validate: `length-matched surface null tau=0.206 (vs length tau=0.214)`, flips `0.0789 vs 0.0833`; `effective panel size 17.4 of 48`; `rho=0.4001` with next-turn sentiment. |
-| 4 | **It is very expensive.** Each label costs 48 LM passes. The fast scorer fell back to the slow path. | corpus: `falling back to the v8 scorer` → **48,732 s (13.5 h) for 3,000 contexts**; each validate run took about 5 h and ran at least 3 times. |
-| 5 | **Length leaks into the reward features by construction.** `Policy.features` mean-pools over prompt+response tokens, so the response's weight n_r/(n_p+n_r) is a function of length. The CLP and length-calibration grid then fought that leak and lost on TEST. | DEV excess `-0.026 CI[-0.060,+0.012]` becomes TEST `-0.090 CI[-0.122,-0.053]` (v11) and `-0.122 CI[-0.154,-0.086]` (v12). Accuracy fell from 0.743 to 0.704. |
-| 6 | **The reward gate is lenient and selection overfits DEV.** The gate fails only if the *whole* CI lies beyond 0.10, so an excess CI of [-0.154,-0.086] passes. Selection takes the first grid cell that passes on DEV, out of 28 cells (winner's curse). One run logged "no pair met both DEV criteria; keeping the last one" and then passed anyway. | reward log, 21:11:54 → 21:13:10 `pass=True` |
-| 7 | **Information preservation is never operationalised.** The policy never sees backend facts, so it must invent reference numbers and availability. Nothing measures whether it drops bad news, and a sentiment reward rewards doing exactly that. The `sentiment_only` arm is a textbook sycophancy set-up. | code: `agent_prompt` has no facts; no fidelity metric anywhere |
-| 8 | **The policy gradient is biased.** Generation output is post-processed (`trim_to_sentence`), then re-tokenised with an EOS appended. The gradient is taken on tokens that were never sampled. With one update per batch the PPO ratio is identically 1, so the clip never acts. Per-sequence mean normalisation is length-biased (Liu et al., 2025). | `generate` → `grpo_step` re-encodes `" " + text + eos` |
-| 9 | **Evaluation is circular and seed pooling is invalid.** `evaluate` scores policies with the same simulator that produced the reward labels. The report averages per-seed p-values before applying Holm, which is not a valid way to combine p-values. | `stage_eval`, `stage_report` |
-| 10 | Dead complexity. The control variate `b=-0.937` almost undoes `raw - cur` (y ≈ raw - 0.063·cur) and is constant within a group anyway. "ICC=1.000, rel=1.000" holds by construction for a deterministic estimator. | validate log |
-
-**Where your framing is not correct.** Using the sentiment or emotion of the user's *next* turn as
-an automatic reward in place of explicit ratings is **not new**. Shi & Yu (ACL 2018, *Sentiment
-Adaptive End-to-End Dialog Systems*) used detected user sentiment as an RL reward in task-oriented
-dialogue. Jaques et al. (2019, *Way Off-Policy Batch Deep RL of Implicit Human Preferences in
-Dialog*) trained offline on implicit reactions, sentiment included. Sharma et al. (WWW 2021, PARTNER)
-used RL to rewrite text for empathy while preserving its content. A paper therefore cannot claim
-novelty for the *idea*. It has to claim novelty for *how the implicit signal is identified and
-safely optimised*, which is where PACE differs. I could not run a literature search from this
-sandbox (network blocked), so check the novelty statements below before you publish.
-
-## 2. The PACE algorithm
-
-1. **Emotion/Satisfaction Detection (ESD).** A RoBERTa classifier over the 7 EmoWOZ emotions, trained
-   on customer utterances only. It never sees the agent turn, so the outcome is not a function of
-   the treatment. It uses temperature scaling. The utility follows EmoWOZ's elicitor taxonomy:
-   *apologetic* counts 0, not −0.5 as in v12. Satisfaction is `S = E_p[U(e)] + β·sentiment`, with β
-   selected against human labels.
-2. **Content-orthogonal phrasing effect.** This is the novel estimand.
-   `τ(h,a) = E[S|h,a] − E[S|h,c(a)]`, where `c(a)` is the delexicalised dialogue acts (social acts
-   removed) or lexical information units. The nuisance `m(h,c)` is cross-fitted by dialogue and
-   linearly recalibrated (v1.1: together with a length basis). `g(h,a)` is fitted on the residuals
-   with Poisson-bootstrapped heads. The head spread becomes a reliability weight in RL. For equal
-   content, τ differences equal true phrasing differences. Content leakage enters only at second
-   order (unit test 2: bad-news sensitivity −0.61 naive vs −0.08 partialled, with the empathy effect
-   preserved). v1.1 also fits the direct model E[S|h,a] and selects between the two on the
-   validation split, because on your data the direct model was more valid within content.
-3. **Constraints.** Information fidelity = `P_ent(response ⇒ source) · (1 − P_contra(source ⇒ response))`.
-   This allows empathy to be added but forbids dropping or contradicting facts. Any number, time or
-   reference code not in the source counts as fabrication. Length has an explicit budget.
-4. **PACE update.** The affect advantage is a leave-one-out advantage computed **only inside the
-   content-equivalent feasible set**, weighted by the group's ensemble reliability. Lagrangian constraint advantages get projected dual ascent. The loss is a Dr.-GRPO constant
-   normalisation plus PPO-clip over several epochs on the **exact sampled tokens**, with k3 KL to the
-   base model obtained through adapter disabling.
-5. **Non-circular evaluation.** A judge trained on *human* labels from dialogues the detector and
-   reward never saw. It is reported together with fidelity, fabrication and length. Seeds are
-   averaged per context, then a dialogue-cluster bootstrap and sign-flip test are run, with Holm
-   correction across the trained arms.
-6. **Gate before RL.** Within the same content stratum and given m̂, τ must predict the **human**
-   label on the test split (lower CI > 0). If it fails, RL is refused. No threshold is tuned.
-
-Arms: `source`, `base` (the instruct model rewriting zero-shot), `pace`, `pace_unconstrained`,
-`pace_alt_reward` (the reward candidate that was not selected), and `sentiment_only`.
-
-## 3. What was verified here, and what was not
-
-Verified in this sandbox (CPU only, no model downloads):
-* `unittest`, units 2 to 5 (unit 1 checks the statistics helpers and prints nothing):
-  * Partialling-out removes about 86% of the content (bad-news) sensitivity and keeps the phrasing
-    effect (0.243 against a truth of 0.250).
-  * In a constrained bandit set in a bad-news context, PACE converges to "keep the news, say it
-    empathetically" with probability ≥ 0.992 on each of 20 seeds. Affect-only optimisation of
-    either reward drops the bad news with probability ≥ 0.998.
-* `selftest` runs every stage end to end on tiny randomly initialised local models. It checks that
-  a fresh adapter equals the reference, that one PPO step moves probability towards
-  positive-advantage samples, that the KL is then positive, and that the adapter survives a
-  save/load round trip.
-
-Not verified. Say so if you report results:
-* **Nothing has been run on real EmoWOZ with the real 3B model here.** No real-data numbers exist
-  yet. Runtime estimates (H200): detector, reward and judge together under 30 min. RL takes roughly
-  15–30 s per step, so about 1.5–2.5 h per arm and seed at 300 steps. Use `--no-4bit` on an H200,
-  because bitsandbytes 4-bit generation is slow, and run arms in parallel.
-* **The unit tests show the anti-sycophancy protection comes from the feasibility constraint, not
-  from partialling-out.** The naive reward *with* PACE's constraints also converges correctly, and
-  the unconstrained τ reward drops bad news too. On synthetic data with tiny models, partialling-out
-  did not beat the naive reward on within-content validity (+0.20 vs +0.29), and τ kept content
-  leakage because m̂ under-fitted. The gate log flags that leakage.
-  The value of partialling-out on real data has to be shown by the `pace_alt_reward` ablation and
-  the gate diagnostics.
-* EmoWOZ next-turn emotions are mostly neutral and the human wizards were already polite. The
-  within-content phrasing signal may be too weak for the gate to pass. That would be a finding
-  about the data, not a reason to lower the threshold.
-* Identification assumes no unobserved confounder of phrasing and outcome given (context, content),
-  such as agent identity. NLI does not catch non-numeric hallucinations that are merely "neutral".
-  The judge is a model. Claims need a human evaluation.
-* I could not inspect the EmoWOZ files, because Zenodo is blocked here. If the MultiWOZ part carries
-  no `dialog_act`, the lexical descriptor is used instead. The `data` stage logs the share of turns
-  with acts.
+- **Verified in this sandbox (CPU, no downloads):** the unit tests pass. The certification test's
+  false-acceptance rate stays ≤ α under three nulls, for both the `t` and `bernstein` bounds, and a
+  real gain is certified in 94 % of trials. SNIS is unbiased on a non-proposal target. Tail-logit
+  scoring is exact. A fresh adapter equals the base model. A DPO step raises the margin. Adapters
+  survive a save/load round trip. The self-test runs all 9 arms end to end, including a forced
+  accept→certify path and the human-study analysis.
+- **Not verified:** nothing has run on real EmoWOZ or the 3B models. With the default safety split
+  (600 dialogues, margins of 0.2·sd), power should be adequate, but the logged
+  `dialogues_for_80pct_power` is what tells you. A legitimate outcome is still "certification
+  failed → SFT returned".
+- **What the guarantee covers:** the *judge*, not humans. H5b and H5c (human study) remain the only
+  test of construct validity.
