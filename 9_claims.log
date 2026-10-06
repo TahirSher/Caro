@@ -1,0 +1,17 @@
+15:14:37 INFO    CASPI caspi-1 | stage 9_claims | device cuda | out /home/tahir/RL-LLM/caspi_run
+15:14:38 INFO    CLAIM caspi_vs_sft:outcome                 not supported
+15:14:38 INFO    CLAIM caspi_vs_caspi_no_rewrite:outcome    not supported
+15:14:38 INFO    CLAIM caspi_vs_caspi_no_pareto:outcome     not supported
+15:14:38 INFO    CLAIM caspi_vs_online_dpo:outcome          not supported
+15:14:38 INFO    CLAIM caspi_vs_sft_bon:outcome             not supported
+15:14:38 INFO    CLAIM caspi_vs_sentiment_only:outcome      not supported
+15:14:38 INFO    CLAIM caspi_vs_offline_dpo:outcome         not supported
+15:14:38 INFO    CLAIM H2                                   supported
+15:14:38 INFO    CLAIM H3c                                  not supported: the guard costs affect
+15:14:38 INFO    CLAIM H5a                                  not supported
+15:14:38 INFO    CLAIM H5b                                  untested
+15:14:38 INFO    CLAIM H5c                                  untested (needs the human study)
+15:14:38 INFO    CLAIM H5c_automatic                        supported
+15:14:38 INFO    CLAIM judge_partial_anchor                 supported
+15:14:38 INFO    CLAIM H6                                   supported
+15:14:38 INFO    CLAIM certified_improvement                not supported (1 of 1 seeds returned SFT)

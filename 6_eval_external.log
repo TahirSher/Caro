@@ -1,0 +1,12 @@
+12:26:11 INFO    CASPI caspi-1 | stage 6_eval_external | device cuda | out /home/tahir/RL-LLM/caspi_run
+12:27:33 INFO    model microsoft/Phi-3.5-mini-instruct | LoRA=False | 4bit=True | eos ids [32000, 32001, 32007]
+12:27:46 INFO    valence classifier j-hartmann/emotion-english-distilroberta-base | 7 labels | multilabel=False
+13:44:44 INFO    external sft               seed 42 | outcome 0.2047 | rank agreement with the training judge (rows) +0.588
+13:44:44 INFO    external sft_bon           seed 42 | outcome 0.2359 | rank agreement with the training judge (rows) +0.600
+13:44:44 INFO    external caspi             seed 42 | outcome 0.2047 | rank agreement with the training judge (rows) +0.588
+13:44:44 INFO    external caspi_no_rewrite  seed 42 | outcome 0.2047 | rank agreement with the training judge (rows) +0.588
+13:44:45 INFO    external caspi_no_pareto   seed 42 | outcome 0.2450 | rank agreement with the training judge (rows) +0.597
+13:44:45 INFO    external caspi_no_guard    seed 42 | outcome 0.2891 | rank agreement with the training judge (rows) +0.538
+13:44:45 INFO    external online_dpo        seed 42 | outcome 0.3209 | rank agreement with the training judge (rows) +0.452
+13:44:45 INFO    external sentiment_only    seed 42 | outcome 0.2816 | rank agreement with the training judge (rows) +0.496
+13:44:45 INFO    external offline_dpo       seed 42 | outcome 0.3139 | rank agreement with the training judge (rows) +0.477

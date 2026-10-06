@@ -1,0 +1,12 @@
+00:20:29 INFO    CASPI caspi-1 | stage 4_train_online_dpo_42 | device cuda | out /home/tahir/RL-LLM/caspi_run
+00:20:34 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+00:20:34 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/sft_policy
+00:20:39 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+00:20:40 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/simulator
+00:20:42 INFO    valence classifier cardiffnlp/twitter-roberta-base-sentiment-latest | 3 labels | multilabel=False
+00:20:44 INFO    valence classifier SamLowe/roberta-base-go_emotions | 28 labels | multilabel=True
+00:20:44 INFO    online_dpo_s42 | flags {'rewrite': False, 'pareto': False, 'guard': False, 'certify': False, 'judge': 'sim', 'offline': False} | 512 training contexts | selection split 400 contexts | safety split 600 contexts (dialogue-disjoint)
+00:35:29 INFO    online_dpo_s42 | round 1 | 508 candidates -> 128 pairs {'affect': 128} | sigma nan | rewrites kept 0/0 | loss 0.6658 pref-acc 0.867 | d log p chosen +1.730 rejected -3.535 | kept
+00:49:35 INFO    online_dpo_s42 | round 2 | 502 candidates -> 128 pairs {'affect': 128} | sigma nan | rewrites kept 0/0 | loss 0.6574 pref-acc 0.777 | d log p chosen +1.659 rejected -2.844 | kept
+01:04:34 INFO    online_dpo_s42 | round 3 | 511 candidates -> 128 pairs {'affect': 128} | sigma nan | rewrites kept 0/0 | loss 0.6358 pref-acc 0.820 | d log p chosen +1.800 rejected -3.389 | kept
+01:19:29 INFO    online_dpo_s42 | round 4 | 507 candidates -> 128 pairs {'affect': 128} | sigma nan | rewrites kept 0/0 | loss 0.6062 pref-acc 0.828 | d log p chosen +1.801 rejected -3.668 | kept

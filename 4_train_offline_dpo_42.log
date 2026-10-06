@@ -1,0 +1,12 @@
+01:31:22 INFO    CASPI caspi-1 | stage 4_train_offline_dpo_42 | device cuda | out /home/tahir/RL-LLM/caspi_run
+01:31:28 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+01:31:28 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/sft_policy
+01:31:33 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+01:31:33 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/simulator
+01:31:36 INFO    valence classifier cardiffnlp/twitter-roberta-base-sentiment-latest | 3 labels | multilabel=False
+01:31:38 INFO    valence classifier SamLowe/roberta-base-go_emotions | 28 labels | multilabel=True
+01:31:38 INFO    offline_dpo_s42 | flags {'rewrite': False, 'pareto': False, 'guard': False, 'certify': False, 'judge': 'sim', 'offline': True} | 512 training contexts | selection split 400 contexts | safety split 600 contexts (dialogue-disjoint)
+01:44:19 INFO    offline_dpo_s42 | round 1 | collected 128 pairs under SFT (offline)
+01:57:14 INFO    offline_dpo_s42 | round 2 | collected 128 pairs under SFT (offline)
+02:10:33 INFO    offline_dpo_s42 | round 3 | collected 128 pairs under SFT (offline)
+02:24:29 INFO    offline_dpo_s42 | round 4 | collected 128 pairs under SFT (offline)

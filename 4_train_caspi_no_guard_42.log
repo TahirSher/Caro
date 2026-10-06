@@ -1,0 +1,13 @@
+22:38:23 INFO    CASPI caspi-1 | stage 4_train_caspi_no_guard_42 | device cuda | out /home/tahir/RL-LLM/caspi_run
+22:38:29 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+22:38:29 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/sft_policy
+22:38:34 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+22:38:34 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/simulator
+22:38:37 INFO    valence classifier cardiffnlp/twitter-roberta-base-sentiment-latest | 3 labels | multilabel=False
+22:38:39 INFO    valence classifier SamLowe/roberta-base-go_emotions | 28 labels | multilabel=True
+22:38:39 INFO    caspi_no_guard_s42 | flags {'rewrite': True, 'pareto': True, 'guard': False, 'certify': False, 'judge': 'sim', 'offline': False} | 512 training contexts | selection split 400 contexts | safety split 600 contexts (dialogue-disjoint)
+22:41:12 INFO    NLI cross-encoder/nli-deberta-v3-base | labels {0: 'contradiction', 1: 'entailment', 2: 'neutral'}
+23:03:32 INFO    caspi_no_guard_s42 | round 1 | 628 candidates -> 176 pairs {'constraint': 104, 'dominance': 59, 'beats_reference': 13} | sigma 0.11589 | rewrites kept 120/256 | loss 0.5615 pref-acc 0.872 | d log p chosen +1.949 rejected -13.010 | kept
+23:28:05 INFO    caspi_no_guard_s42 | round 2 | 615 candidates -> 162 pairs {'constraint': 104, 'dominance': 47, 'beats_reference': 11} | sigma 0.11821 | rewrites kept 119/256 | loss 0.5126 pref-acc 0.768 | d log p chosen +2.432 rejected -8.492 | kept
+23:55:05 INFO    caspi_no_guard_s42 | round 3 | 643 candidates -> 175 pairs {'constraint': 101, 'dominance': 58, 'beats_reference': 16} | sigma 0.10802 | rewrites kept 136/256 | loss 0.4204 pref-acc 0.820 | d log p chosen +2.754 rejected -22.518 | kept
+00:20:27 INFO    caspi_no_guard_s42 | round 4 | 621 candidates -> 170 pairs {'constraint': 103, 'dominance': 47, 'beats_reference': 20} | sigma 0.13164 | rewrites kept 120/256 | loss 0.3443 pref-acc 0.820 | d log p chosen +2.219 rejected -29.720 | kept

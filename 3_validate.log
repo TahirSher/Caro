@@ -1,0 +1,8 @@
+04:48:18 INFO    CASPI caspi-1 | stage 3_validate | device cuda | out /home/tahir/RL-LLM/caspi_run
+04:48:29 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+04:48:30 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/sft_policy
+04:50:14 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+04:50:14 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/simulator
+04:50:17 INFO    valence classifier cardiffnlp/twitter-roberta-base-sentiment-latest | 3 labels | multilabel=False
+04:50:32 INFO    valence classifier SamLowe/roberta-base-go_emotions | 28 labels | multilabel=True
+06:07:25 INFO    judge validity | anchor rho +0.526 CI[+0.468,+0.578] | partial (given current emotion) +0.509 CI[+0.451,+0.567] | pool replication r 0.846 | within-context noise sd 0.0993 vs signal sd 0.1964 | flip rate 0.272

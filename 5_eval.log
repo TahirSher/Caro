@@ -1,0 +1,25 @@
+02:31:10 INFO    CASPI caspi-1 | stage 5_eval | device cuda | out /home/tahir/RL-LLM/caspi_run
+02:31:21 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+02:31:21 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/sft_policy
+02:31:22 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/sft_policy
+02:33:36 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/sft_policy
+02:41:43 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/policy_caspi_s42
+02:43:59 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/policy_caspi_no_rewrite_s42
+02:46:16 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/policy_caspi_no_pareto_s42
+02:48:24 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/policy_caspi_no_guard_s42
+02:50:36 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/policy_online_dpo_s42
+02:52:40 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/policy_sentiment_only_s42
+02:54:52 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/policy_offline_dpo_s42
+02:57:34 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+02:57:34 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/simulator
+02:57:37 INFO    valence classifier cardiffnlp/twitter-roberta-base-sentiment-latest | 3 labels | multilabel=False
+02:57:40 INFO    valence classifier SamLowe/roberta-base-go_emotions | 28 labels | multilabel=True
+12:25:55 INFO    eval sft               seed 42 | outcome 0.2834 monitor 0.3361 | content 0.245 hygiene 0.996 words 14.7 | median ESS 23.2
+12:25:57 INFO    eval caspi             seed 42 | outcome 0.2834 monitor 0.3361 | content 0.245 hygiene 0.996 words 14.7 | median ESS 23.2
+12:25:59 INFO    eval caspi_no_rewrite  seed 42 | outcome 0.2834 monitor 0.3361 | content 0.245 hygiene 0.996 words 14.7 | median ESS 23.2
+12:26:00 INFO    eval caspi_no_pareto   seed 42 | outcome 0.3351 monitor 0.3742 | content 0.240 hygiene 0.994 words 13.6 | median ESS 27.7
+12:26:02 INFO    eval caspi_no_guard    seed 42 | outcome 0.3732 monitor 0.3855 | content 0.251 hygiene 0.999 words 14.3 | median ESS 27.1
+12:26:03 INFO    eval online_dpo        seed 42 | outcome 0.3877 monitor 0.3938 | content 0.233 hygiene 0.945 words 12.0 | median ESS 27.0
+12:26:04 INFO    eval sentiment_only    seed 42 | outcome 0.3626 monitor 0.3986 | content 0.231 hygiene 0.990 words 16.7 | median ESS 23.6
+12:26:05 INFO    eval offline_dpo       seed 42 | outcome 0.3779 monitor 0.3951 | content 0.240 hygiene 0.959 words 13.3 | median ESS 27.8
+12:26:07 INFO    eval sft_bon           seed 42 | outcome 0.3671 monitor 0.3820 | content 0.245 hygiene 1.000 words 14.4 | median ESS 24.1

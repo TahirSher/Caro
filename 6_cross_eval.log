@@ -1,0 +1,10 @@
+13:44:49 INFO    CASPI caspi-1 | stage 6_cross_eval | device cuda | out /home/tahir/RL-LLM/caspi_run
+13:45:00 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+13:45:00 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/sft_policy
+13:48:21 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+13:48:21 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/simulator
+13:48:24 INFO    valence classifier cardiffnlp/twitter-roberta-base-sentiment-latest | 3 labels | multilabel=False
+13:48:26 INFO    valence classifier SamLowe/roberta-base-go_emotions | 28 labels | multilabel=True
+14:49:24 INFO    model microsoft/Phi-3.5-mini-instruct | LoRA=False | 4bit=True | eos ids [32000, 32001, 32007]
+14:49:26 INFO    valence classifier j-hartmann/emotion-english-distilroberta-base | 7 labels | multilabel=False
+15:13:52 INFO    cross-evaluator within-context agreement 0.589 CI[0.558,0.619] (chance 0.5, p < 5e-05) over 299 contexts | between-context rho: simulator +0.420, external +0.279

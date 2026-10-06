@@ -1,0 +1,56 @@
+15:13:57 INFO    CASPI caspi-1 | stage 7_report_eval | device cuda | out /home/tahir/RL-LLM/caspi_run
+15:14:12 INFO    arm                  outcome   monitor  content  hygiene    words
+15:14:12 INFO    sft                   0.2834    0.3361    0.245    0.996     14.7
+15:14:12 INFO    sft_bon               0.3671    0.3820    0.245    1.000     14.4
+15:14:12 INFO    caspi                 0.2834    0.3361    0.245    0.996     14.7
+15:14:12 INFO    caspi_no_rewrite      0.2834    0.3361    0.245    0.996     14.7
+15:14:12 INFO    caspi_no_pareto       0.3351    0.3742    0.240    0.994     13.6
+15:14:12 INFO    caspi_no_guard        0.3732    0.3855    0.251    0.999     14.3
+15:14:12 INFO    online_dpo            0.3877    0.3938    0.233    0.945     12.0
+15:14:12 INFO    sentiment_only        0.3626    0.3986    0.231    0.990     16.7
+15:14:12 INFO    offline_dpo           0.3779    0.3951    0.240    0.959     13.3
+15:14:12 INFO    sft_bon_vs_sft:outcome                   +0.0836 CI95[+0.0699,+0.0979] p < 5e-05 holm 0.0007 | MDE80 0.0202 | TOST-equivalent: False
+15:14:12 INFO    sft_bon_vs_sft:monitor                   +0.0460 CI95[+0.0335,+0.0590] p < 5e-05 holm 0.0007 | MDE80 0.0185 | non-inferior: True
+15:14:12 INFO    sft_bon_vs_sft:content                   -0.0001 CI95[-0.0209,+0.0215] p 0.9925 holm 1.0000 | MDE80 0.0297 | non-inferior: True
+15:14:12 INFO    caspi_vs_sft:outcome                     +0.0000 CI95[+0.0000,+0.0000] p 1.0000 holm 1.0000 | MDE80 0.0000 | TOST-equivalent: True
+15:14:12 INFO    caspi_vs_sft:monitor                     +0.0000 CI95[+0.0000,+0.0000] p 1.0000 holm 1.0000 | MDE80 0.0000 | non-inferior: True
+15:14:12 INFO    caspi_vs_sft:content                     +0.0000 CI95[+0.0000,+0.0000] p 1.0000 holm 1.0000 | MDE80 0.0000 | non-inferior: True
+15:14:12 INFO    caspi_no_rewrite_vs_sft:outcome          +0.0000 CI95[+0.0000,+0.0000] p 1.0000 holm 1.0000 | MDE80 0.0000 | TOST-equivalent: True
+15:14:12 INFO    caspi_no_rewrite_vs_sft:monitor          +0.0000 CI95[+0.0000,+0.0000] p 1.0000 holm 1.0000 | MDE80 0.0000 | non-inferior: True
+15:14:12 INFO    caspi_no_rewrite_vs_sft:content          +0.0000 CI95[+0.0000,+0.0000] p 1.0000 holm 1.0000 | MDE80 0.0000 | non-inferior: True
+15:14:12 INFO    caspi_no_pareto_vs_sft:outcome           +0.0517 CI95[+0.0415,+0.0633] p < 5e-05 holm 0.0007 | MDE80 0.0151 | TOST-equivalent: False
+15:14:12 INFO    caspi_no_pareto_vs_sft:monitor           +0.0382 CI95[+0.0272,+0.0495] p < 5e-05 holm 0.0007 | MDE80 0.0155 | non-inferior: True
+15:14:12 INFO    caspi_no_pareto_vs_sft:content           -0.0051 CI95[-0.0179,+0.0082] p 0.4442 holm 1.0000 | MDE80 0.0184 | non-inferior: True
+15:14:12 INFO    caspi_no_guard_vs_sft:outcome            +0.0898 CI95[+0.0742,+0.1067] p < 5e-05 holm 0.0007 | MDE80 0.0231 | TOST-equivalent: False
+15:14:12 INFO    caspi_no_guard_vs_sft:monitor            +0.0494 CI95[+0.0375,+0.0627] p < 5e-05 holm 0.0007 | MDE80 0.0188 | non-inferior: True
+15:14:12 INFO    caspi_no_guard_vs_sft:content            +0.0059 CI95[-0.0117,+0.0244] p 0.5145 holm 1.0000 | MDE80 0.0251 | non-inferior: True
+15:14:12 INFO    online_dpo_vs_sft:outcome                +0.1043 CI95[+0.0876,+0.1227] p < 5e-05 holm 0.0007 | MDE80 0.0246 | TOST-equivalent: False
+15:14:12 INFO    online_dpo_vs_sft:monitor                +0.0577 CI95[+0.0451,+0.0707] p < 5e-05 holm 0.0007 | MDE80 0.0183 | non-inferior: True
+15:14:12 INFO    online_dpo_vs_sft:content                -0.0123 CI95[-0.0314,+0.0065] p 0.2158 holm 1.0000 | MDE80 0.0273 | non-inferior: True
+15:14:12 INFO    sentiment_only_vs_sft:outcome            +0.0792 CI95[+0.0635,+0.0958] p < 5e-05 holm 0.0007 | MDE80 0.0231 | TOST-equivalent: False
+15:14:12 INFO    sentiment_only_vs_sft:monitor            +0.0626 CI95[+0.0485,+0.0768] p < 5e-05 holm 0.0007 | MDE80 0.0202 | non-inferior: True
+15:14:12 INFO    sentiment_only_vs_sft:content            -0.0143 CI95[-0.0342,+0.0065] p 0.1792 holm 1.0000 | MDE80 0.0295 | non-inferior: True
+15:14:12 INFO    offline_dpo_vs_sft:outcome               +0.0945 CI95[+0.0795,+0.1110] p < 5e-05 holm 0.0007 | MDE80 0.0219 | TOST-equivalent: False
+15:14:12 INFO    offline_dpo_vs_sft:monitor               +0.0591 CI95[+0.0458,+0.0720] p < 5e-05 holm 0.0007 | MDE80 0.0188 | non-inferior: True
+15:14:12 INFO    offline_dpo_vs_sft:content               -0.0047 CI95[-0.0229,+0.0136] p 0.6131 holm 1.0000 | MDE80 0.0255 | non-inferior: True
+15:14:12 INFO    caspi_vs_sft_bon:outcome                 -0.0836 CI95[-0.0979,-0.0699] p < 5e-05 holm 0.0007 | MDE80 0.0202 | TOST-equivalent: False
+15:14:12 INFO    caspi_vs_sft_bon:monitor                 -0.0460 CI95[-0.0590,-0.0335] p < 5e-05 holm 0.0007 | MDE80 0.0185 | non-inferior: False
+15:14:12 INFO    caspi_vs_sft_bon:content                 +0.0001 CI95[-0.0215,+0.0209] p 0.9925 holm 1.0000 | MDE80 0.0297 | non-inferior: True
+15:14:12 INFO    caspi_vs_caspi_no_rewrite:outcome        +0.0000 CI95[+0.0000,+0.0000] p 1.0000 holm 1.0000 | MDE80 0.0000 | TOST-equivalent: True
+15:14:12 INFO    caspi_vs_caspi_no_rewrite:monitor        +0.0000 CI95[+0.0000,+0.0000] p 1.0000 holm 1.0000 | MDE80 0.0000 | non-inferior: True
+15:14:12 INFO    caspi_vs_caspi_no_rewrite:content        +0.0000 CI95[+0.0000,+0.0000] p 1.0000 holm 1.0000 | MDE80 0.0000 | non-inferior: True
+15:14:12 INFO    caspi_vs_caspi_no_pareto:outcome         -0.0517 CI95[-0.0633,-0.0415] p < 5e-05 holm 0.0007 | MDE80 0.0151 | TOST-equivalent: False
+15:14:12 INFO    caspi_vs_caspi_no_pareto:monitor         -0.0382 CI95[-0.0495,-0.0272] p < 5e-05 holm 0.0007 | MDE80 0.0155 | non-inferior: False
+15:14:12 INFO    caspi_vs_caspi_no_pareto:content         +0.0051 CI95[-0.0082,+0.0179] p 0.4442 holm 1.0000 | MDE80 0.0184 | non-inferior: True
+15:14:12 INFO    caspi_vs_caspi_no_guard:outcome          -0.0898 CI95[-0.1067,-0.0742] p < 5e-05 holm 0.0007 | MDE80 0.0231 | TOST-equivalent: False
+15:14:12 INFO    caspi_vs_caspi_no_guard:monitor          -0.0494 CI95[-0.0627,-0.0375] p < 5e-05 holm 0.0007 | MDE80 0.0188 | non-inferior: False
+15:14:12 INFO    caspi_vs_caspi_no_guard:content          -0.0059 CI95[-0.0244,+0.0117] p 0.5145 holm 1.0000 | MDE80 0.0251 | non-inferior: True
+15:14:12 INFO    caspi_vs_online_dpo:outcome              -0.1043 CI95[-0.1227,-0.0876] p < 5e-05 holm 0.0007 | MDE80 0.0246 | TOST-equivalent: False
+15:14:12 INFO    caspi_vs_online_dpo:monitor              -0.0577 CI95[-0.0707,-0.0451] p < 5e-05 holm 0.0007 | MDE80 0.0183 | non-inferior: False
+15:14:12 INFO    caspi_vs_online_dpo:content              +0.0123 CI95[-0.0065,+0.0314] p 0.2158 holm 1.0000 | MDE80 0.0273 | non-inferior: True
+15:14:12 INFO    caspi_vs_sentiment_only:outcome          -0.0792 CI95[-0.0958,-0.0635] p < 5e-05 holm 0.0007 | MDE80 0.0231 | TOST-equivalent: False
+15:14:12 INFO    caspi_vs_sentiment_only:monitor          -0.0626 CI95[-0.0768,-0.0485] p < 5e-05 holm 0.0007 | MDE80 0.0202 | non-inferior: False
+15:14:12 INFO    caspi_vs_sentiment_only:content          +0.0143 CI95[-0.0065,+0.0342] p 0.1792 holm 1.0000 | MDE80 0.0295 | non-inferior: True
+15:14:12 INFO    caspi_vs_offline_dpo:outcome             -0.0945 CI95[-0.1110,-0.0795] p < 5e-05 holm 0.0007 | MDE80 0.0219 | TOST-equivalent: False
+15:14:12 INFO    caspi_vs_offline_dpo:monitor             -0.0591 CI95[-0.0720,-0.0458] p < 5e-05 holm 0.0007 | MDE80 0.0188 | non-inferior: False
+15:14:12 INFO    caspi_vs_offline_dpo:content             +0.0047 CI95[-0.0136,+0.0229] p 0.6131 holm 1.0000 | MDE80 0.0255 | non-inferior: True

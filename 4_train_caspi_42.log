@@ -1,0 +1,20 @@
+06:07:31 INFO    CASPI caspi-1 | stage 4_train_caspi_42 | device cuda | out /home/tahir/RL-LLM/caspi_run
+06:07:43 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+06:07:43 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/sft_policy
+06:07:49 INFO    model Qwen/Qwen2.5-3B-Instruct | LoRA=True | 4bit=True | eos ids [151643, 151645]
+06:07:49 INFO    loaded adapter /home/tahir/RL-LLM/caspi_run/simulator
+06:07:52 INFO    valence classifier cardiffnlp/twitter-roberta-base-sentiment-latest | 3 labels | multilabel=False
+06:07:56 INFO    valence classifier SamLowe/roberta-base-go_emotions | 28 labels | multilabel=True
+06:07:56 INFO    caspi_s42 | flags {'rewrite': True, 'pareto': True, 'guard': True, 'certify': True, 'judge': 'sim', 'offline': False} | 512 training contexts | selection split 400 contexts | safety split 600 contexts (dialogue-disjoint)
+06:10:41 INFO    NLI cross-encoder/nli-deberta-v3-base | labels {0: 'contradiction', 1: 'entailment', 2: 'neutral'}
+07:33:58 INFO    caspi_s42 | round 1 guard | affect +0.0369 (LB +0.0244) monitor +0.0245 (LB +0.0127) content -0.006 hygiene -0.030 log-length -0.237 | ESS 12.0 | power(monitor,content,hygiene,length) {'monitor': 0.51, 'content': 1.0, 'hygiene': 0.81, 'length': 1.0} | REJECT ['hygiene_noninferior', 'length_equivalent']
+07:33:59 INFO    caspi_s42 | round 1 | 628 candidates -> 176 pairs {'constraint': 104, 'dominance': 59, 'beats_reference': 13} | sigma 0.11589 | rewrites kept 120/256 | loss 0.5616 pref-acc 0.864 | d log p chosen +1.939 rejected -13.029 | rolled back
+08:58:16 INFO    caspi_s42 | round 2 guard | affect +0.0421 (LB +0.0324) monitor +0.0144 (LB +0.0044) content -0.001 hygiene -0.010 log-length -0.125 | ESS 12.3 | power(monitor,content,hygiene,length) {'monitor': 0.6, 'content': 1.0, 'hygiene': 0.98, 'length': 1.0} | ACCEPT
+08:58:16 INFO    caspi_s42 | round 2 | 622 candidates -> 173 pairs {'dominance': 61, 'constraint': 100, 'beats_reference': 12} | sigma 0.11265 | rewrites kept 119/256 | loss 0.5351 pref-acc 0.875 | d log p chosen +1.368 rejected -7.315 | kept
+10:23:35 INFO    caspi_s42 | round 3 guard | affect +0.0555 (LB +0.0439) monitor +0.0443 (LB +0.0333) content +0.016 hygiene -0.018 log-length -0.123 | ESS 12.1 | power(monitor,content,hygiene,length) {'monitor': 0.55, 'content': 1.0, 'hygiene': 0.96, 'length': 1.0} | REJECT ['hygiene_noninferior']
+10:23:35 INFO    caspi_s42 | round 3 | 648 candidates -> 185 pairs {'dominance': 59, 'constraint': 107, 'beats_reference': 19} | sigma 0.12324 | rewrites kept 136/256 | loss 0.4870 pref-acc 0.848 | d log p chosen +1.576 rejected -3.784 | rolled back
+11:45:16 INFO    caspi_s42 | round 4 guard | affect +0.0532 (LB +0.0423) monitor +0.0350 (LB +0.0242) content +0.011 hygiene -0.015 log-length -0.125 | ESS 12.2 | power(monitor,content,hygiene,length) {'monitor': 0.55, 'content': 1.0, 'hygiene': 0.94, 'length': 1.0} | REJECT ['hygiene_noninferior']
+11:45:16 INFO    caspi_s42 | round 4 | 629 candidates -> 177 pairs {'constraint': 109, 'dominance': 57, 'beats_reference': 11} | sigma 0.14862 | rewrites kept 120/256 | loss 0.4668 pref-acc 0.828 | d log p chosen +0.753 rejected -0.960 | rolled back
+11:45:16 INFO    caspi_s42 | 2 consecutive rejections: stop
+13:14:06 INFO    caspi_s42 | CERTIFICATION (alpha 0.050, t bound, 600 contexts) | FAIL -> returning SFT | failed: ['hygiene_noninferior', 'length_equivalent'] | power at zero difference {'monitor': 0.6, 'content': 1.0, 'hygiene': 0.97, 'length': 1.0} | dialogues for 80% power {'monitor': 1025, 'content': 52, 'hygiene': 306, 'length': 33}
+13:14:06 WARNING caspi_s42 | the returned policy IS the SFT policy (no accepted round, or certification failed); this is the algorithm working as designed, report it
