@@ -1,75 +1,84 @@
-# CASPI: Certified Affect-Safe Preference Iteration
+# CAMPO: Constrained, Anchored Mirror-descent Policy Optimisation
 
-`caspi.py` is one self-contained script. It aligns a customer-service LLM with customer satisfaction
-from **implicit** feedback, meaning the simulated customer's next-turn emotion, with no ratings. The
-model keeps the task information, and the script **certifies** that the returned policy is no worse
-than SFT. It replaces the PACE pipeline (`pace-1`, ~7,900 lines) that the research brief analysed.
-The old CARO machinery is gone: the panel estimator, logit projector, length calibrations, learned
-reward model and GRPO.
+`campo.py` is one self-contained script. It aligns a customer-service LLM with customer satisfaction
+from **implicit** feedback, meaning the simulated customer's next-turn emotion, with no ratings. It
+replaces CASPI (`caspi.py`, kept for reference). The redesign is driven by the CASPI logs, not by
+assumptions.
 
 ```
-python caspi.py unittest     # statistics, estimator and guarantee checks (numpy, seconds)
-python caspi.py selftest     # every stage on tiny random local models (CPU, ~2 min)
-python caspi.py all --download --models-dir /home/tahir/RL-LLM/models --out caspi_run --no-load-4bit
+python campo.py unittest                               # numpy checks: statistics, E-step, mirror descent, guarantee
+python campo.py selftest                               # every stage and arm on tiny random local models (CPU)
+python campo.py diagnose-caspi --caspi-dir caspi_run   # evidence table from your CASPI logs
+python campo.py all --download --models-dir /home/tahir/RL-LLM/models --out campo_run --no-load-4bit
 ```
 
-Existing `sft_policy/` and `simulator/` adapters stay valid because the prompt formats are
-unchanged. Copy them into `--out` and run stages individually:
-`validate → preregister → train → eval → eval-external → cross-eval → report → length →
-human-export → claims`.
+Your CASPI `sft_policy/` and `simulator/` adapters stay valid because the prompt formats are
+unchanged. Copy them into `--out` and run `validate → preregister → train → eval → eval-external →
+cross-eval → report → length → human-export → claims`.
 
-**Rename.** "PACE" collides with an iterative-DPO preprint (arXiv 2602.05370) and other 2026 work.
-"CiPO" is also taken (ACL 2026). In one search I found no LLM-alignment method called CASPI, but
-check again before you submit.
+## What the CASPI logs show (`diagnose-caspi`)
 
-## How every gap in the brief is addressed
+| | Question | Answer from the logs |
+|---|---|---|
+| E1 | Is the implicit signal too weak? | **No.** Partial anchor ρ = +0.51 [0.45, 0.57]. Within-context signal sd is 0.196 against noise sd 0.099. Cross-evaluator agreement is 0.589 [0.558, 0.619]. |
+| E2 | Can learners raise the outcome? | **Yes.** Every learner gained between +0.05 and +0.10 over SFT, and the gains replicate on the external evaluator. |
+| E3 | Why did CASPI return SFT? | **The acceptance machinery.** All 4 guard rounds had affect lower bounds > 0. 3 of them were rejected only for hygiene (−0.010 to −0.030 against a 0.02 margin) or length (−0.24 against ±0.15). Each rejection rolled back, doubled β and halved the learning rate. Certification then failed on the same two constraints. |
+| E4 | Were the constraints optimised? | **No, only tested.** 59 % of CASPI's pairs were "constraint" pairs. The rejected log-likelihood fell by up to 30 nats per round, pushing replies shorter. online_dpo bought the largest outcome with hygiene 0.945 (SFT 0.996) and 12.0 words (SFT 14.7). |
+| E5 | Is there a safe mechanism? | **Yes.** Best-of-4 over SFT samples gained +0.084 with no loss of hygiene, length or information. |
 
-| Brief item | What `caspi.py` does |
-|---|---|
-| 6.3 / 7.1-1 Acceptance test under-powered (α/K per round, n≤300, margins 0.1·sd) | **Seldonian split.** The per-round guard runs on a *selection* split and is explicitly a heuristic. **One** certification test at full α runs on a disjoint *safety* split with one context per dialogue, so units are i.i.d. The test is intersection-union, so it needs no multiplicity correction across objectives or rounds. Every check logs its power at zero difference and the number of dialogues needed for 80 % power. |
-| 7.1-2 Dev-pool estimator bias | Every guard and certification builds a **fresh** pool in which the SFT reply *and* the new reply are both proposals. There is an ESS floor. Pools are never reused across runs. |
-| 7.1-3 Training-pool proposal asymmetry | **Every** candidate is a proposal of its context's pool. Pairs whose estimates rest on fewer than `min_pair_ess` effective replies are dropped. |
-| 7.1-4 Silent component loss | Only the shared-pool estimator exists, so nothing can silently fall back. |
-| 7.1-5 Length not in acceptance | TOST equivalence on the log word ratio (±0.15) is part of the guard and the certification. |
-| 7.1-6 Likelihood displacement | Chosen and rejected log-likelihood changes are logged every round. If the chosen likelihood falls, the NLL anchor doubles. Near-duplicate pairs (Jaccard ≥ 0.9) are dropped. |
-| 7.1-7 σ estimated once | σ is re-estimated **every round** on an independent replicate pool. |
-| 7.1-8 Vacuous information constraint | The constraint pair now also requires that information is not lost. The vacuous share is logged per round, and the content share per test. |
-| 7.1-9 Hygiene check used the mean only | Hygiene now gets a one-sided confidence bound like every other objective. |
-| 7.1-10 Data-dependent margins | Margins are numeric and pre-registered (`preregistration.json`, written before training). Changing them raises an error. |
-| 7 Over-claims in the docstrings | The docstring states a Proposition and proof sketch with exact conditions, plus what is **not** claimed: the judge's SNIS bias, judge ≠ humans, and that the guard carries no guarantee. It drops "off-policy corrected" and the DPO≡RL claim, and cites Seldonian/HC-RLHF. |
-| G1/G3 Monitor shares the simulator | The monitor customer is now the **base** model with the adapter disabled, read by an independent labeller. This is partial independence: same base weights. |
-| G4 Information measure is lexical | Rewrites must pass an **NLI** completeness/contradiction filter. The acceptance test still uses the lexical score, and this is stated. |
-| G6 Rewrites unchecked | Covered by the same NLI filter. Rewrites come from the base model (off-policy), which the docs state. |
-| G7 Evaluation circularity | **Symmetric evaluation pools**, where all arms are proposals of one pool per context. Also an out-of-family external judge, cross-evaluator agreement, a blinded human study, and `claims.md`. |
-| RQ4 Baselines | `online_dpo`, `sentiment_only` (same optimiser, agent-wording sentiment), `offline_dpo` (same data budget), `sft_bon` (selected on an independent pool). |
+Where the earlier hypotheses were wrong:
 
-## Bugs in the predecessor that this script fixes
+- **H1/H3a/H3b/H4 for CASPI** were not supported because `caspi == sft`, not because the idea failed.
+- **"CASPI beats online DPO on raw outcome"** is the wrong hypothesis when online DPO violates
+  hygiene and length. Under a binding constraint the constrained optimum cannot exceed the
+  unconstrained one. H4 is now a Pareto claim.
+- **The margins are unchanged** (they are identical to CASPI's). Loosening them after seeing the
+  data would invalidate the test, so the optimiser was changed instead.
 
-1. **Inexact importance sampling.** The pool replies were sampled with the model's default
-   generation config. Qwen2.5-Instruct ships `top_k=20` (`top_p=0.8`), and only `top_p` and the
-   repetition penalty were overridden. The pool replies were also post-processed (`trim_to_sentence`)
-   and re-tokenised before scoring. Both make the sampling density differ from the density in the
-   weights.
-   - **Fix:** CASPI samples with `top_k=0` and scores the **sampled token ids**.
-   - **Verified here:** on the tiny model, 1,179 draws fell outside the top 20 tokens against an
-     expected 1,148.
-   - **Check your snapshot's** `generation_config.json`.
-2. **Biased evaluation pools.** Eval pools were built from gold + the *first* arm's replies. Every
-   later arm was scored by extrapolation. CASPI makes all arms proposals of one pool.
-3. **Stale pool reuse.** Pools persisted across runs and were reused even when the proposals had
-   changed. CASPI rebuilds them every run.
+## The method: optimise exactly what is certified
+
+Each round, for each training context:
+
+1. **Sample.** Draw N exact samples from the current policy (temperature 1, no top-k or top-p, sampled
+   token ids kept).
+2. **Judge.** Score them on CASPI's shared simulator pool, which E1 validated. The reward is
+   pessimistic: affect minus κ times the delta-method SNIS standard error (Owen, 2013).
+3. **Project.** This is the new step. Take the I-projection onto the certified constraint set:
+   `q*(y) ∝ 1[hygienic, EOS] · exp((r + λ·info + μ·log len) / η_x)`.
+   - η_x is solved per context so that KL(q‖uniform) = ε, which is the MPO trust region.
+   - μ is solved so that the expected log length equals the sampling policy's.
+   - λ is the smallest value that keeps the expected information.
+   - All three are exact, by bisection.
+
+   This is a constrained, soft best-of-N (E5): best-of-N is the special case η→0 without constraints.
+4. **Distil.** Weighted maximum likelihood of the exact samples, i.e. forward KL to q*. It cannot push
+   any reply's likelihood down (E4). It stops when an unbiased, term-wise non-negative estimate of
+   KL(π_t‖π_{t+1}) on held-out π_t samples (the "k3" estimator) exceeds `kl_max`.
+5. **Select and certify, with no ratchet.** Every round is a checkpoint, and nothing is rolled back
+   or tightened. The best lower bound among the checkpoints that pass the constraint tests on the
+   selection split wins. Then one intersection-union test at α runs on a dialogue-disjoint safety
+   split; if it fails, SFT is returned.
+
+Iterating steps 3–4 is KL mirror descent: π_T ∝ π_0 exp(Σ_t s/η_t) on the feasible set. The unit
+tests check this identity, the KL radius, the moment constraints, and the false-acceptance rate of
+the certification test under five nulls.
+
+**Arms:** `campo`, `campo_no_{pessimism,moments,trust,select}`, `sentiment_only`, `online_dpo` and
+`offline_dpo` (both on the same samples and judge), and `sft` / `sft_bon`.
 
 ## What was verified, and what was not
 
-- **Verified in this sandbox (CPU, no downloads):** the unit tests pass. The certification test's
-  false-acceptance rate stays ≤ α under three nulls, for both the `t` and `bernstein` bounds, and a
-  real gain is certified in 94 % of trials. SNIS is unbiased on a non-proposal target. Tail-logit
-  scoring is exact. A fresh adapter equals the base model. A DPO step raises the margin. Adapters
-  survive a save/load round trip. The self-test runs all 9 arms end to end, including a forced
-  accept→certify path and the human-study analysis.
-- **Not verified:** nothing has run on real EmoWOZ or the 3B models. With the default safety split
-  (600 dialogues, margins of 0.2·sd), power should be adequate, but the logged
-  `dialogues_for_80pct_power` is what tells you. A legitimate outcome is still "certification
-  failed → SFT returned".
-- **What the guarantee covers:** the *judge*, not humans. H5b and H5c (human study) remain the only
-  test of construct validity.
+- **Verified here** (CPU, tiny random models):
+  - The unit tests pass.
+  - The `diagnose-caspi` verdicts above come from your uploaded logs.
+  - The self-test runs every stage and every arm, including a forced select→certify path.
+- **Not verified:** nothing has run on EmoWOZ with the 3B models.
+  - Whether CAMPO's outcome gain matches `caspi_no_guard`'s +0.09 while passing hygiene and length is
+    the open empirical question. The E-step only guarantees the constraints for the training target
+    in expectation; whether the fitted policy also meets them is what the certification test checks.
+  - A legitimate outcome is still "no checkpoint passes → SFT returned". In that case the logs show
+    which constraint, and `dialogues_for_80pct_power` says whether the test was under-powered.
+- **Scope of the guarantee:** it covers the judges (simulator and monitor), not humans. H5b and H5c
+  (the human study) remain the only test of construct validity.
+
+**Name:** I found no LLM-alignment method called CAMPO in one search; check again before you submit.
