@@ -1,84 +1,74 @@
-# CAMPO: Constrained, Anchored Mirror-descent Policy Optimisation
+# TACIT: Targeted, Anchored, Closed-loop Iterated Tilting
 
-`campo.py` is one self-contained script. It aligns a customer-service LLM with customer satisfaction
+`tacit.py` is one self-contained script. It aligns a customer-service LLM with customer satisfaction
 from **implicit** feedback, meaning the simulated customer's next-turn emotion, with no ratings. It
-replaces CASPI (`caspi.py`, kept for reference). The redesign is driven by the CASPI logs, not by
-assumptions.
+does so under hard constraints on task information, hygiene and length, and certifies
+non-degradation. It replaces CAMPO (`campo.py`, kept for reference). The redesign is driven by
+CAMPO's result files (`results.zip`).
 
 ```
-python campo.py unittest                               # numpy checks: statistics, E-step, mirror descent, guarantee
-python campo.py selftest                               # every stage and arm on tiny random local models (CPU)
-python campo.py diagnose-caspi --caspi-dir caspi_run   # evidence table from your CASPI logs
-python campo.py all --download --models-dir /home/tahir/RL-LLM/models --out campo_run --no-load-4bit
+python tacit.py unittest                                 # numpy checks: E-step, best-of-n bound, controller, selection, test level
+python tacit.py selftest                                 # every stage and arm on tiny random local models (CPU)
+python tacit.py diagnose-campo --campo-dir results       # evidence table from CAMPO's results (unzip results.zip)
+python tacit.py all --download --models-dir /home/tahir/RL-LLM/models --out tacit_run --no-load-4bit
 ```
 
-Your CASPI `sft_policy/` and `simulator/` adapters stay valid because the prompt formats are
-unchanged. Copy them into `--out` and run `validate → preregister → train → eval → eval-external →
-cross-eval → report → length → human-export → claims`.
+Your `sft_policy/` and `simulator/` adapters stay valid because the prompt formats are unchanged.
+Copy them into `--out` and run `validate → preregister → train → eval → eval-external → cross-eval →
+report → length → human-export → claims`. Train a subset with `--arms`; the priority is
+`tacit tacit_open_loop campo sft sft_bon tacit_bon`.
 
-## What the CASPI logs show (`diagnose-caspi`)
+## What CAMPO's results show (`diagnose-campo`)
 
-| | Question | Answer from the logs |
+| | Question | Answer from `results.zip` |
 |---|---|---|
-| E1 | Is the implicit signal too weak? | **No.** Partial anchor ρ = +0.51 [0.45, 0.57]. Within-context signal sd is 0.196 against noise sd 0.099. Cross-evaluator agreement is 0.589 [0.558, 0.619]. |
-| E2 | Can learners raise the outcome? | **Yes.** Every learner gained between +0.05 and +0.10 over SFT, and the gains replicate on the external evaluator. |
-| E3 | Why did CASPI return SFT? | **The acceptance machinery.** All 4 guard rounds had affect lower bounds > 0. 3 of them were rejected only for hygiene (−0.010 to −0.030 against a 0.02 margin) or length (−0.24 against ±0.15). Each rejection rolled back, doubled β and halved the learning rate. Certification then failed on the same two constraints. |
-| E4 | Were the constraints optimised? | **No, only tested.** 59 % of CASPI's pairs were "constraint" pairs. The rejected log-likelihood fell by up to 30 nats per round, pushing replies shorter. online_dpo bought the largest outcome with hygiene 0.945 (SFT 0.996) and 12.0 words (SFT 14.7). |
-| E5 | Is there a safe mechanism? | **Yes.** Best-of-4 over SFT samples gained +0.084 with no loss of hygiene, length or information. |
+| G1 | Why did a seed return SFT? | It was **seed 43**, not 44, and it failed on length: the safety CI was [−0.151, −0.095] against ±0.15. The E-step held length exactly on its own target every round, yet the *deployed* policy drifted shorter (−0.06 → −0.11 → −0.14 → −0.20). Seed 42 passed with only 0.019 of slack. The constraints were open-loop: anchored to π_t's temperature-1 samples instead of to SFT under the deployment decoder. |
+| G2 | Why does `sft_bon` win? | CAMPO's steps (ε = 0.5 per round) are about half of one best-of-6 step (≤ 0.96 nats). The arms that stepped harder beat `sft_bon` only by breaking constraints. In addition, `sft_bon` uses the judge **at test time** on the test contexts. |
+| G3 | Why does pessimism do nothing? | It *cannot* do anything. The SNIS standard error is nearly constant within a context, and the softmax is invariant to a per-context constant. This is an identity, now a unit test. |
+| G4 | Why did selection pick a failing round? | Selection accepted rounds with thin margins (length slack 0.012 in seed 43), which then failed on the safety split. |
+| G5 | Trust region? | `no_trust` raised the outcome but failed content in seed 44. The real issue is G1 (no feedback), not the step size alone. |
 
-Where the earlier hypotheses were wrong:
+## The method
 
-- **H1/H3a/H3b/H4 for CASPI** were not supported because `caspi == sft`, not because the idea failed.
-- **"CASPI beats online DPO on raw outcome"** is the wrong hypothesis when online DPO violates
-  hygiene and length. Under a binding constraint the constrained optimum cannot exceed the
-  unconstrained one. H4 is now a Pareto claim.
-- **The margins are unchanged** (they are identical to CASPI's). Loosening them after seeing the
-  data would invalidate the test, so the optimiser was changed instead.
+TACIT keeps CAMPO's validated parts: exact samples, the shared-pool judge, the I-projection E-step,
+the weighted-MLE M-step and one intersection-union certification. It changes four things:
 
-## The method: optimise exactly what is certified
+1. **Deployment probe + closed-loop moment targets (G1).** Each round, the policy and SFT answer a
+   fixed probe set with the *deployment* decoder, using common random numbers. The measured cumulative
+   drift sets the E-step targets: E_q[log len] − E_π[log len] = −g·d_L, and E_q[info] − E_π[info] ≥
+   max(0, −g·d_I). This is integral feedback on exactly what the certification tests (Stooke et al.,
+   ICML 2020).
+2. **Best-of-n-sized steps (G2).** The E-step KL radius per context, and the M-step KL stop, are set
+   to log n − (n−1)/n. That is the upper bound on one best-of-n step's KL (Beirami et al., ICML 2025).
+   Iterated distillation of best-of-n steps compounds (Sessa et al., 2024); that is how a
+   single-sample policy can overtake a best-of-4 selector.
+3. **Predicted-pass selection (G4).** A round is a candidate only if its selection-split statistics
+   predict the safety test will pass with 2× inflated half-widths (Thomas et al., Science 2019).
+4. **No pessimism term (G3)**, and **compute-matched claims (G2):**
+   - H4a: TACIT at N = 1 (no judge at inference) is non-inferior to `sft_bon` at N = 4.
+   - H4b: `tacit_bon` beats `sft_bon` at the same N.
+   - H4c: TACIT beats CAMPO under the same budget.
 
-Each round, for each training context:
-
-1. **Sample.** Draw N exact samples from the current policy (temperature 1, no top-k or top-p, sampled
-   token ids kept).
-2. **Judge.** Score them on CASPI's shared simulator pool, which E1 validated. The reward is
-   pessimistic: affect minus κ times the delta-method SNIS standard error (Owen, 2013).
-3. **Project.** This is the new step. Take the I-projection onto the certified constraint set:
-   `q*(y) ∝ 1[hygienic, EOS] · exp((r + λ·info + μ·log len) / η_x)`.
-   - η_x is solved per context so that KL(q‖uniform) = ε, which is the MPO trust region.
-   - μ is solved so that the expected log length equals the sampling policy's.
-   - λ is the smallest value that keeps the expected information.
-   - All three are exact, by bisection.
-
-   This is a constrained, soft best-of-N (E5): best-of-N is the special case η→0 without constraints.
-4. **Distil.** Weighted maximum likelihood of the exact samples, i.e. forward KL to q*. It cannot push
-   any reply's likelihood down (E4). It stops when an unbiased, term-wise non-negative estimate of
-   KL(π_t‖π_{t+1}) on held-out π_t samples (the "k3" estimator) exceeds `kl_max`.
-5. **Select and certify, with no ratchet.** Every round is a checkpoint, and nothing is rolled back
-   or tightened. The best lower bound among the checkpoints that pass the constraint tests on the
-   selection split wins. Then one intersection-union test at α runs on a dialogue-disjoint safety
-   split; if it fails, SFT is returned.
-
-Iterating steps 3–4 is KL mirror descent: π_T ∝ π_0 exp(Σ_t s/η_t) on the feasible set. The unit
-tests check this identity, the KL radius, the moment constraints, and the false-acceptance rate of
-the certification test under five nulls.
-
-**Arms:** `campo`, `campo_no_{pessimism,moments,trust,select}`, `sentiment_only`, `online_dpo` and
-`offline_dpo` (both on the same samples and judge), and `sft` / `sft_bon`.
+The margins are identical to CAMPO's and CASPI's. Loosening them after seeing the data would
+invalidate the test.
 
 ## What was verified, and what was not
 
 - **Verified here** (CPU, tiny random models):
-  - The unit tests pass.
-  - The `diagnose-caspi` verdicts above come from your uploaded logs.
-  - The self-test runs every stage and every arm, including a forced select→certify path.
-- **Not verified:** nothing has run on EmoWOZ with the 3B models.
-  - Whether CAMPO's outcome gain matches `caspi_no_guard`'s +0.09 while passing hygiene and length is
-    the open empirical question. The E-step only guarantees the constraints for the training target
-    in expectation; whether the fitted policy also meets them is what the certification test checks.
-  - A legitimate outcome is still "no checkpoint passes → SFT returned". In that case the logs show
-    which constraint, and `dialogues_for_80pct_power` says whether the test was under-powered.
-- **Scope of the guarantee:** it covers the judges (simulator and monitor), not humans. H5b and H5c
-  (the human study) remain the only test of construct validity.
+  - The unit tests pass. They cover the best-of-n KL bound on 50 random discrete cases, exact
+    per-context radii, exact closed-loop targets, and the G3 identity. In simulation, the controller
+    keeps |drift| > 0.12 in 1 % of runs against 97 % open-loop, and predicted-pass selection cuts
+    post-selection certification failures from 3 % to 1 %. They also cover the certification level
+    under five nulls.
+  - The self-test runs every stage and every arm, including the forced E-step → M-step → select →
+    certify path, and `diagnose-campo`.
+  - `diagnose-campo` reproduces G1–G5 from `results.zip`.
+- **Not verified:** nothing has run on EmoWOZ with the 3B models. Whether TACIT beats `sft_bon` and
+  certifies in every seed is the open empirical question.
+  - Certification in every seed cannot be guaranteed by any design: it is a test with power below 1.
+    TACIT raises that power and reports the rate.
+  - TACIT costs about 2× CAMPO per round (192 contexts × 8 samples, pool 32).
+- **Scope of the guarantee:** it covers the judges, not humans; the human study remains the test of
+  construct validity.
 
-**Name:** I found no LLM-alignment method called CAMPO in one search; check again before you submit.
+**Name:** I found no LLM-alignment method called TACIT in one search; check again before you submit.
