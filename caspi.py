@@ -1,115 +1,5 @@
 #!/usr/bin/env python3
 """CASPI -- Certified Affect-Safe Preference Iteration.
-
-Implicit-feedback alignment of a customer-service LLM for customer satisfaction, with a certified
-non-degradation guarantee.  One self-contained script: data, models, judge, training, baselines,
-evaluation, statistics, human-study tooling and a claims audit.
-
-OBJECTIVE
-    Make an agent's replies more emotionally appropriate WITHOUT explicit human feedback and WITHOUT
-    conveying less task information, and never return a policy that is worse than the supervised (SFT)
-    policy on the measured objectives, with probability at least 1 - alpha.
-
-IMPLICIT FEEDBACK (the judge)
-    A customer simulator (a causal LM fine-tuned on EmoWOZ to write the customer's next turn) answers a
-    candidate agent reply; a sentiment engine reads the affect of the simulated customer reply.  The
-    estimand of a reply r in context x is O(x, r) = E_{c ~ p(.|x, r)}[s(c)].  It is estimated on ONE
-    shared pool of simulated replies per context, drawn from the balance-heuristic mixture of a set of
-    proposal agent turns, with self-normalised importance weights (Veach & Guibas, 1995; Owen & Zhou,
-    2000; truncation after Ionides, 2008).  Every candidate of a context is scored on the same pool
-    (common random numbers), so Monte Carlo error largely cancels in within-context comparisons.
-
-    Importance sampling is EXACT here, not approximate: replies are sampled at temperature 1 with top-k,
-    top-p and repetition penalty disabled, and the weights use the log-probabilities of the very token
-    ids that were sampled (EOS included when it was emitted).  Re-tokenising post-processed text, or
-    sampling with the model's default top-k (Qwen2.5-Instruct ships top_k=20, top_p=0.8), would make the
-    sampling density differ from the density in the weights and bias every estimate.
-
-THE ALGORITHM (one round; arms switch components off for ablations and baselines)
-    1. Collect.  Per training context: the SFT reference reply (the content anchor), `group` on-policy
-       samples, and `rewrites` delivery-only rewrites of the reference by the base instruct model.  A
-       rewrite is kept only if an NLI model finds it complete (rewrite entails the reference) and not
-       contradictory: lexical overlap alone cannot certify that content was preserved.
-    2. Judge.  EVERY candidate of a context is a proposal of that context's pool, so all candidates get
-       comparable effective sample sizes (ESS); candidates whose ESS falls below a floor are not used.
-    3. Calibrate.  The noise sd sigma of a within-context affect difference is measured EVERY round on an
-       independent replicate pool: Var(d0 - d1) = 2 sigma^2 for two independent pools.
-    4. Mine.  Pareto pairs: the winner is hygienic and inside the length band, beats the loser on affect
-       by at least z * sigma (a resolved preference, not Monte Carlo noise), and keeps at least the
-       loser's task information.  Near-duplicate pairs are dropped: very similar chosen/rejected replies
-       cause likelihood displacement in DPO (Razin et al., ICLR 2025).
-    5. Update.  Weighted DPO (Rafailov et al., 2023) against the frozen SFT policy, plus an NLL anchor on
-       the chosen reply (Pang et al., 2024).  The change of the chosen log-likelihood is measured after
-       every update; if it fell (displacement), the NLL weight is doubled for the next round.
-    6. Guard (selection split).  The new policy and SFT answer the same selection-dev contexts; both
-       replies are proposals of a FRESH pool, so neither estimate is extrapolated.  The round is kept only
-       if a vector test passes: affect superiority, non-inferiority of an independent MONITOR (the
-       un-fine-tuned base model as customer, read by an emotion classifier that no other stage uses),
-       of task information and of hygiene, length equivalence (TOST), and an ESS floor.  Otherwise the
-       weights roll back and the trust region tightens (beta doubles, the learning rate halves).
-    After the last round, CERTIFY: the same vector test, ONCE, at level alpha, on a safety-dev split
-    disjoint from everything used to produce the candidate (Seldonian candidate-selection /
-    safety-test split: Thomas et al., Science 2019; for RLHF: Chittepu et al., RLJ 2025).  Failing it
-    returns the SFT policy.
-
-GUARANTEE (Proposition; conditions stated, nothing hidden)
-    Let theta be the candidate after training.  It is a function of the training contexts, the
-    selection split and their pools only.  Let S be the safety split: G dialogues, one context each,
-    drawn i.i.d. from the evaluation context distribution and independent of theta.  For objective k let
-    D_k = O_k(theta) - O_k(SFT) be the paired per-context difference measured on a fresh pool, and
-    Delta_k = E[D_k] (the expectation is over contexts, sampling of the two replies, and the pool).  CASPI
-    returns theta only if every one-sided test rejects its null: H_A: Delta_A <= 0 (affect),
-    H_k: Delta_k <= -m_k (non-inferiority, pre-registered margins m_k), and both one-sided length nulls.
-    Then
-        P(theta is returned  and  some H_k is true) <= alpha                (bound = "bernstein")
-        P(theta is returned  and  some H_k is true) <= alpha + o(1), G->inf  (bound = "t")
-    Proof sketch.  Condition on theta: S is independent of it, so the D_k,i are i.i.d. with finite
-    variance and bounded support.  The empirical-Bernstein lower bound (Maurer & Pontil, 2009) has
-    finite-sample coverage >= 1 - alpha; the Student-t bound has coverage 1 - alpha + o(1) (CLT and
-    Slutsky).  This is an intersection-union test (Berger, 1982): theta is returned only if ALL tests
-    reject, so if any null H_k is true, returning theta requires test k to falsely reject, which has
-    probability <= alpha.  No multiplicity correction is needed across objectives, and none is needed
-    across rounds because only ONE certification test is made.  Taking expectations over theta gives
-    the unconditional statement.
-    What it does NOT say.  (i) The Delta_k are properties of the JUDGES (simulator + labeller, and the
-    monitor customer + monitor labeller), estimated by truncated self-normalised importance sampling.
-    That estimator carries an O(1/R) bias, which is the same for both arms when both are proposals of
-    the pool, but is not zero.  (ii) It is a statement about the safety-split context distribution,
-    not about humans: construct validity is tested separately (validate, cross-eval, the human study).
-    (iii) The per-round guard is a selection heuristic.  It carries no guarantee and is not
-    multiplicity-corrected.
-
-ARMS
-    caspi                full method
-    caspi_no_rewrite     no delivery-only rewrites (exploration by sampling only)
-    caspi_no_pareto      best-vs-worst affect pairs, no noise margin, no information constraint
-    caspi_no_guard       no per-round guard and no certification (the acceptance machinery ablated)
-    online_dpo           standard iterative DPO with the same judge: sampling, best-vs-worst, no guard
-    sentiment_only       online_dpo whose preferences come from the AGENT reply's own sentiment: the same
-                         optimiser with another signal, so the comparison isolates the judge
-    offline_dpo          the same data budget collected once under SFT, judged, then one DPO fit
-    sft, sft_bon         SFT; best-of-N SFT samples selected by the judge on an independent pool
-
-EVALUATION (circularity is broken in steps)
-    eval            test split; every arm's reply to a context is a proposal of ONE shared evaluation
-                    pool, so all arms are scored symmetrically on the same simulated replies
-    eval-external   the same protocol with an out-of-family customer LLM and an emotion classifier
-                    that no other stage uses
-    cross-eval      within-context agreement of the two automatic evaluators (chance = 0.5)
-    human-*         blinded pairwise study with within-context validity items and attention checks
-    claims          pre-registered rules turn every artefact into "supported / not supported / untested"
-
-REFERENCES (peer-reviewed)
-    Berger 1982 Technometrics (intersection-union tests); Chittepu et al. 2025 RLJ (HC-RLHF); Ionides 2008
-    JCGS; Maurer & Pontil 2009 COLT (empirical Bernstein); Owen & Zhou 2000 JASA; Pang et al. 2024 NeurIPS
-    (IRPO); Rafailov et al. 2023 NeurIPS (DPO); Razin et al. 2025 ICLR (likelihood displacement); Thomas et
-    al. 2015 ICML (HCPI); Thomas et al. 2019 Science (Seldonian); Veach & Guibas 1995 SIGGRAPH; Feng et al.
-    2022 LREC (EmoWOZ); Wang et al. 2026 ICLR (RLVER, the closest simulator-reward competitor).
-
-Usage
-    python caspi.py all --download --models-dir /path/to/hf_cache --out caspi_run
-    python caspi.py unittest        # statistics, estimator and guarantee tests (numpy only, seconds)
-    python caspi.py selftest        # whole pipeline on tiny random local models (CPU, no downloads)
 """
 from __future__ import annotations
 
@@ -217,7 +107,7 @@ class GenConfig:
     min_new_tokens: int = 4
     temperature: float = 0.7
     top_p: float = 0.95
-    top_k: int = 0                      # 0 disables top-k (never inherit a model's default top-k)
+    top_k: int = 0                      
     repetition_penalty: float = 1.0
 
 
@@ -232,45 +122,43 @@ class SFTConfig:
     evals_per_epoch: int = 4
     patience: int = 4
     dev_examples: int = 1000
-    max_train: int = 0                  # 0 = all training turns
+    max_train: int = 0                  
 
 
 @dataclass
 class CASPIConfig:
     rounds: int = 4
     contexts_per_round: int = 128
-    group: int = 3                      # on-policy samples per context
-    rewrites: int = 2                   # delivery-only rewrites of the reference reply per context
-    pool_size: int = 24                 # simulated replies per training context (all candidates are proposals)
-    beta: float = 0.1                   # DPO temperature; doubled after a rejected round
-    lr: float = 5e-6                    # halved after a rejected round
+    group: int = 3                      
+    rewrites: int = 2                   
+    pool_size: int = 24                 
+    beta: float = 0.1                   
+    lr: float = 5e-6                    
     epochs: int = 2
     batch: int = 4
-    nll_coef: float = 0.05              # NLL anchor on chosen replies; doubled after likelihood displacement
+    nll_coef: float = 0.05              
     nll_coef_max: float = 1.0
-    z: float = 1.645                    # a preference needs an affect gap >= z * sigma
-    eps_content: float = 0.05           # a winner may lose at most this much task information
-    len_low: float = 0.5                # length band, relative to the reference reply
+    z: float = 1.645                    
+    eps_content: float = 0.05           
+    len_low: float = 0.5                
     len_high: float = 1.6
-    max_pairs: int = 3                  # per context
-    dup_jaccard: float = 0.9            # drop pairs whose word-set Jaccard similarity is at least this
-    min_pair_ess: float = 3.0           # drop pairs whose affect estimate rests on fewer effective replies
-    calib_contexts: int = 48            # contexts per round for the replicate-pool noise estimate
-    rewriter_adapter: bool = False      # False: rewrites by the base instruct model (LoRA disabled)
-    rewrite_min_entail: float = 0.5     # NLI: P(rewrite entails reference) must reach this
-    rewrite_max_contra: float = 0.2     # NLI: P(rewrite contradicts reference) must stay below this
-    select_contexts: int = 400          # per-round guard (selection split; heuristic, not the guarantee)
+    max_pairs: int = 3                  
+    dup_jaccard: float = 0.9            
+    min_pair_ess: float = 3.0           
+    calib_contexts: int = 48            
+    rewriter_adapter: bool = False      
+    rewrite_min_entail: float = 0.5     
+    rewrite_max_contra: float = 0.2     
+    select_contexts: int = 400          
     select_alpha: float = 0.10
-    safety_contexts: int = 600          # certification split (one context per dialogue)
-    alpha: float = 0.05                 # level of the single certification test (the guarantee)
-    bound: str = "t"                    # "t" (asymptotic) | "bernstein" (finite-sample, conservative)
-    # Pre-registered non-inferiority margins in natural units.  0.012 is 0.2 x the within-context sd
-    # (~0.06) of the simulated affect outcome measured in the CARO corpus logs (within var 0.0037).
+    safety_contexts: int = 600          
+    alpha: float = 0.05                 
+    bound: str = "t"                    
     margin_monitor: float = 0.012
-    margin_info: float = 0.05           # content-score units (recall)
-    margin_hygiene: float = 0.02        # hygiene-rate units
-    length_equiv: float = 0.15          # |E log word ratio| < 0.15 (about +-16%), TOST
-    min_ess_frac: float = 0.2           # median ESS of guard estimates must reach this x pool size
+    margin_info: float = 0.05           
+    margin_hygiene: float = 0.02        
+    length_equiv: float = 0.15          
+    min_ess_frac: float = 0.2           
     guard_pool_size: int = 24
     max_rejections: int = 2
 
@@ -279,7 +167,7 @@ class CASPIConfig:
 class Config:
     data_dir: str = "emowoz_data"
     out: str = "caspi_run"
-    device: str = ""                    # "" = cuda if available, else cpu
+    device: str = ""                    
     models_dir: str = ""
     download: bool = False
     seed: int = 42
@@ -1414,13 +1302,7 @@ def stage_simulator(cfg: Config) -> Dict[str, Any]:
 
 
 def stage_validate(cfg: Config) -> Dict[str, Any]:
-    """Construct validity and noise of the judge, on labelled VALID contexts (no policy is involved).
 
-    * between-context anchor: judge(gold reply) vs the real customer's next-turn emotion label, and the
-      PARTIAL anchor given the current turn's label (emotional carry-over removed);
-    * replication: the same replies on an independent pool (ICC of the context-level estimates);
-    * within-context noise: sigma of the gold-vs-SFT affect difference across the two pools versus the
-      spread of that difference (the signal a preference has to resolve), and the flip rate."""
     ex = Experiment(cfg, "3_validate")
     turns = [t for t in select_turns(ex.turns, "valid", cfg.validate_contexts, cfg.seed + 3, require_next=True,
                                      one_per_dialogue=True) if t.human_valence is not None]
@@ -1466,14 +1348,7 @@ def stage_validate(cfg: Config) -> Dict[str, Any]:
 
 def mine_pairs(A: np.ndarray, C: np.ndarray, H: np.ndarray, ess: np.ndarray, texts: Sequence[str], sigma: float,
                pc: CASPIConfig, pareto: bool) -> List[Tuple[int, int, float, str]]:
-    """Preference pairs (winner, loser, weight, kind) for ONE context; index 0 is the reference reply.
 
-    pareto=True: i beats j only if i is feasible (H), A_i - A_j >= z sigma, C_i >= C_j - eps (information;
-    vacuous only when the gold turn carries no information), both estimates rest on >= min_pair_ess effective
-    replies, and the replies are not near-duplicates.  Kept: the largest-margin pair, the largest-margin pair
-    against the reference, and one constraint pair (feasible beats infeasible, without information loss).
-    Weights grow with the margin in noise units, from 0.5 to 1.
-    pareto=False (baselines): best vs worst by A, weight 1."""
     A, C, H, ess = (np.asarray(v) for v in (A, C, H, ess))
     n = A.size
     if n < 2:
@@ -1513,14 +1388,7 @@ def mine_pairs(A: np.ndarray, C: np.ndarray, H: np.ndarray, ess: np.ndarray, tex
 
 def vector_test(diffs: Dict[str, np.ndarray], cluster: Sequence[Any], alpha: float, pc: CASPIConfig,
                 best_gain: float, ess_median: float, pool_size: int) -> Dict[str, Any]:
-    """Intersection-union test of improvement over SFT (see the module docstring for the guarantee).
 
-    diffs: per-context paired differences new - SFT for affect, monitor, content, hygiene, and the log word
-    ratio for length.  Every component test is one-sided at level alpha; the policy passes only if all pass.
-    The power column is the probability of passing that non-inferiority test when the true difference is 0,
-    given the observed spread (normal approximation); a low value means the margin is below what n can
-    resolve, so a good policy will probably be rejected.  dialogues_for_80pct_power is the safety-split size
-    that the observed spread would need; use it to plan the next pre-registration, never to change this one."""
     m = pc.bound
     lb = {k: confidence_bound(diffs[k], cluster, alpha, "lower", m, r) for k, r in
           (("affect", 4.0), ("monitor", 4.0), ("content", 2.0), ("hygiene", 2.0), ("length", 2.0))}
@@ -1593,8 +1461,8 @@ def collect_candidates(pol: Policy, ref: Dict[str, Any], ctx: Sequence[Turn], pc
         raw = pol.generate_text(rp, GenConfig(max_new_tokens=96, temperature=0.8), seed + 2,
                                 adapter=pc.rewriter_adapter)
         drafts = [y for y in y_ref for _ in range(pc.rewrites)]
-        pe, _ = ex.nli(raw, drafts)                 # completeness: the rewrite entails the draft
-        _, pc_ = ex.nli(drafts, raw)                # consistency: the draft does not contradict the rewrite
+        pe, _ = ex.nli(raw, drafts)                 
+        _, pc_ = ex.nli(drafts, raw)                
         stats["rewrites_generated"] = len(raw)
         for k, (r, e, c) in enumerate(zip(raw, pe, pc_)):
             if e >= pc.rewrite_min_entail and c <= pc.rewrite_max_contra and norm_text(r) != norm_text(drafts[k]):
@@ -1645,7 +1513,7 @@ def train_arm(cfg: Config, arm: str, seed: int) -> Dict[str, Any]:
     tag = f"{arm}_s{seed}"
     seed_everything(seed)
     pol = ex.policy("sft_policy")
-    ref = pol.snapshot()                             # SFT: the DPO reference and the baseline of every test
+    ref = pol.snapshot()                             
     judge = g_judge = g_monitor = None
     if flags["judge"] == "sim" or flags["guard"] or flags["certify"]:
         sim = ex.policy("simulator")
@@ -1702,7 +1570,7 @@ def train_arm(cfg: Config, arm: str, seed: int) -> Dict[str, Any]:
                               "d_rejected_logp": 0.0})
         rec.update(upd)
         rec["nll_coef"] = nll
-        if upd["d_chosen_logp"] < 0:                # likelihood displacement: strengthen the anchor
+        if upd["d_chosen_logp"] < 0:                
             nll = min(pc.nll_coef_max, 2.0 * nll)
         accept = True
         if flags["guard"]:
@@ -1817,8 +1685,7 @@ def stage_eval(cfg: Config) -> Dict[str, Any]:
     sim = ex.policy("simulator")
     judge, monitor = ex.judges(sim, "eval", cfg.eval_pool_size)
     for sd, cands in bon_samples.items():
-        # best-of-N is SELECTED on an independent pool, so the evaluation pool does not reward its own
-        # selection noise (winner's curse)
+
         flat_t = [t for t in te for _ in range(cfg.bon_n)]
         a = judge.expect(f"bon_select_s{sd}", flat_t, [y for c in cands for y in c],
                          {t.uid: c for t, c in zip(te, cands)})["affect"].reshape(len(te), cfg.bon_n)
